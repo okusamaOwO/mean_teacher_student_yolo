@@ -20,7 +20,7 @@ from utils.general import LOGGER, check_dataset, check_file
 
 try:
     import wandb
-
+    os.environ['WANDB_MODE'] = 'disabled'
     assert hasattr(wandb, '__version__')  # verify package import not local dir
 except (ImportError, AssertionError):
     wandb = None
