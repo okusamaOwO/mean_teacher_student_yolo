@@ -1,3 +1,5 @@
+from helpers.add_noise import noise_aug_student, noise_aug_teacher
+exit()
 import argparse
 import math
 import os
@@ -7,7 +9,6 @@ import time
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -15,6 +16,7 @@ import torch.nn as nn
 import yaml
 from torch.optim import lr_scheduler
 from tqdm import tqdm
+
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLO root directory
@@ -168,13 +170,14 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     # from utils.plots import plot_lr_scheduler; plot_lr_scheduler(optimizer, scheduler, epochs)
 
     # EMA
-    teacher_model_ema = ModelEMA(student_model) if RANK in {-1, 0} else None
+    ema = ModelEMA(student_model) if RANK in {-1, 0} else None
+
 
     # Resume
     best_fitness, start_epoch = 0.0, 0
     if pretrained:
         if resume:
-            best_fitness, start_epoch, epochs = smart_resume(ckpt, student_optimizer, teacher_model_ema, weights,
+            best_fitness, start_epoch, epochs = smart_resume(ckpt, student_optimizer, ema, weights,
                                                              epochs, resume)
         del ckpt, csd
 
@@ -187,7 +190,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     if opt.sync_bn and cuda and RANK != -1:
         student_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(student_model).to(device)
         LOGGER.info('Using SyncBatchNorm()')
-
+    # nên sử dụng một loader duy nhất thôi nhưng mà loader này sẽ trả về hai loại ảnh
     # Trainloader
     train_loader, dataset = create_dataloader(train_path,
                                               imgsz,
@@ -293,7 +296,12 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             callbacks.run('on_train_batch_start')
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
+            imgs_student = imgs
+            imgs_teacher = imgs
 
+            # teacher, student model both training with source data
+            # after that, give the teacher what -> give the teacher the unlabeled data
+            #
             # Warmup
             if ni <= nw:
                 xi = [0, nw]  # x interp
@@ -334,8 +342,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 student_optimizer.zero_grad()
 
                 # ở đây nó đang sử dụng ema sẵn rồi, nhưng mà đang không biết cái hàm ema update này là làm gì, nó có gán student = ema của chính nó luôn không ? 
-                if teacher_model_ema:
-                    teacher_model_ema.update(student_model)
+                if ema:
+                    ema.update(student_model)
                 last_opt_step = ni
 
             # Log
@@ -356,7 +364,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         if RANK in {-1, 0}:
             # mAP
             callbacks.run('on_train_epoch_end', epoch=epoch)
-            teacher_model_ema.update_attr(student_model,
+            ema.update_attr(student_model,
                                           include=['yaml', 'nc', 'hyp', 'names', 'stride', 'class_weights'])
             final_epoch = (epoch + 1 == epochs) or stopper.possible_stop
             if not noval or final_epoch:  # Calculate mAP
@@ -364,7 +372,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                                 batch_size=batch_size // WORLD_SIZE * 2,
                                                 imgsz=imgsz,
                                                 half=amp,
-                                                model=teacher_model_ema.ema,
+                                                model=ema.ema,
                                                 single_cls=single_cls,
                                                 dataloader=val_loader,
                                                 save_dir=save_dir,
@@ -386,8 +394,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     'epoch': epoch,
                     'best_fitness': best_fitness,
                     'model': deepcopy(de_parallel(student_model)).half(),
-                    'ema': deepcopy(teacher_model_ema.ema).half(),
-                    'updates': teacher_model_ema.updates,
+                    'ema': deepcopy(ema.ema).half(),
+                    'updates': ema.updates,
                     'optimizer': student_optimizer.state_dict(),
                     'opt': vars(opt),
                     'git': GIT_INFO,  # {remote, branch, commit} if a git repo

@@ -1,0 +1,8 @@
+train: /lam_dc_ma/mydataset/2025fog/foggy_driving/images
+val: /lam_dc_ma/mydataset/2025fog/foggy_zurich_direct/test/images
+
+nc: 3
+names:
+  1: person
+  2: bicycle
+  3: car
