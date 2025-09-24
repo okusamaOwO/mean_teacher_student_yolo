@@ -11,11 +11,12 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 import yaml
 from torch.optim import lr_scheduler
 from tqdm import tqdm
 from helpers.add_noise import add_random_noise
-
+from helpers.update_teacher import update_teacher
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLO root directory
 if str(ROOT) not in sys.path:
@@ -34,7 +35,7 @@ from utils.general import (LOGGER, TQDM_BAR_FORMAT, check_amp, check_dataset, ch
                            check_git_status, check_img_size, check_requirements, check_suffix, check_yaml, colorstr,
                            get_latest_run, increment_path, init_seeds, intersect_dicts, labels_to_class_weights,
                            labels_to_image_weights, methods, one_cycle, print_args, print_mutation, strip_optimizer,
-                           yaml_save, one_flat_cycle)
+                           yaml_save, one_flat_cycle, non_max_suppression)
 from utils.loggers import Loggers
 from utils.loggers.comet.comet_utils import check_comet_resume
 from utils.loss_tal_dual import ComputeLoss
@@ -101,7 +102,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     names = {0: 'item'} if single_cls and len(data_dict['names']) != 1 else data_dict['names']  # class names
     # is_coco = isinstance(val_path, str) and val_path.endswith('coco/val2017.txt')  # COCO dataset
     is_coco = isinstance(val_path, str) and val_path.endswith('val2017.txt')  # COCO dataset
-
+    alpha = 0.99
     # Model
     check_suffix(weights, '.pt')  # check weights
     pretrained = weights.endswith('.pt')
@@ -310,9 +311,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         student_optimizer.zero_grad()
         target_iter = iter(cycle(unsupervised_loader))
 
-        for i, (
-                source_imgs, source_labels, paths,
-                _) in pbar:  # batch -------------------------------------------------------------
+        for i, (source_imgs, source_labels, paths,_) in pbar:  # batch -------------------------------------------------------------
             target_imgs, _, target_paths, _ = next(target_iter)
             callbacks.run('on_train_batch_start')
             ni = i + nb * epoch  # number integrated batches (since train start)
@@ -344,20 +343,35 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                           source_imgs.shape[2:]]  # new shape (stretched to gs-multiple)
                     source_imgs = nn.functional.interpolate(source_imgs, size=ns, mode='bilinear',
                                                             align_corners=False)
+                    imgs_teacher = nn.functional.interpolate(imgs_teacher, size=ns, mode='bilinear',
+                                                             align_corners=False)
+                    imgs_student = nn.functional.interpolate(imgs_student, size=ns, mode='bilinear',
+                                                             align_corners=False)
 
             # Forward
             with torch.cuda.amp.autocast(amp):
                 # supervised learning with source data
                 student_pred = student_model(source_imgs)  # student forward
-                supervised_loss, supervised_loss_items = compute_loss(student_pred, source_labels.to(
-                    device))  # loss scaled by batch_size
+                supervised_loss, supervised_loss_items = compute_loss(student_pred, source_labels.to(device))  # loss scaled by batch_size
 
                 # unsupervised learning with target data
-                student_pred_target = student_model(imgs_student)
-                teacher_generated_labels = teacher_model(imgs_teacher)
-                unsupervised_loss, unsupervised_loss_items = compute_loss(student_pred_target, teacher_generated_labels)
+                # turn raw output of teacher model to label format
 
-                total_loss = supervised_loss + unsupervised_loss
+                student_pred_target_main_branch = student_model(imgs_student)[0]
+                teacher_pred_target_main_branch = teacher_model(imgs_teacher)[0]
+                consistency_loss = 0
+                for student_tensor, teacher_tensor in zip(student_pred_target_main_branch, teacher_pred_target_main_branch):
+                    # consistency_loss += torch.norm(student_tensor-teacher_tensor, p=2)
+                    # consistency_loss = 1 - F.cosine_similarity(student_tensor, teacher_tensor, dim=-1).mean()
+                    consistency_loss += F.smooth_l1_loss(student_tensor, teacher_tensor)
+
+                print("-" * 1000)
+                print("supervised_loss", supervised_loss)
+                print("supervised_loss", consistency_loss)
+                print("-" * 1000)
+
+                weight_for_consistency_loss = 0.005
+                total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss
                 # unsupervised learning with target data
                 if RANK != -1:
                     total_loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
@@ -375,14 +389,14 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 scaler.update()
                 student_optimizer.zero_grad()
 
-                # ở đây nó đang sử dụng ema sẵn rồi, nhưng mà đang không biết cái hàm ema update này là làm gì, nó có gán student = ema của chính nó luôn không ?
                 if ema:
                     ema.update(student_model)
                 last_opt_step = ni
 
+                update_teacher(student_model, teacher_model, alpha)
             # Log
             if RANK in {-1, 0}:
-                mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                mloss = (mloss * i + supervised_loss_items) / (i + 1)  # update mean losses
                 mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
                 pbar.set_description(('%11s' * 2 + '%11.4g' * 5) %
                                      (f'{epoch}/{epochs - 1}', mem, *mloss, source_labels.shape[0],
