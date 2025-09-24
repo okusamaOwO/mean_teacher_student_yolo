@@ -20,7 +20,7 @@ ROOT = FILE.parents[0]  # YOLO root directory
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
-
+from itertools import cycle
 import val_dual as validate  # for end-of-epoch mAP
 from models.experimental import attempt_load
 from models.yolo import Model
@@ -95,6 +95,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     with torch_distributed_zero_first(LOCAL_RANK):
         data_dict = data_dict or check_dataset(data)  # check if None
     train_path, val_path = data_dict['train'], data_dict['val']
+    unlabel_data_path = "/content/mean_teacher_student_yolo/mini/train/images"
     nc = 1 if single_cls else int(data_dict['nc'])  # number of classes
     names = {0: 'item'} if single_cls and len(data_dict['names']) != 1 else data_dict['names']  # class names
     # is_coco = isinstance(val_path, str) and val_path.endswith('coco/val2017.txt')  # COCO dataset
@@ -206,6 +207,23 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                               prefix=colorstr('train: '),
                                               shuffle=True,
                                               min_items=opt.min_items)
+    unsupervised_loader, unsupervised_dataset = create_dataloader(unlabel_data_path,
+                                            imgsz,
+                                            batch_size // WORLD_SIZE,
+                                            gs,
+                                            single_cls,
+                                            hyp=hyp,
+                                            augment=True,
+                                            cache=None if opt.cache == 'val' else opt.cache,
+                                            rect=opt.rect,
+                                            rank=LOCAL_RANK,
+                                            workers=workers,
+                                            image_weights=opt.image_weights,
+                                            close_mosaic=opt.close_mosaic != 0,
+                                            quad=opt.quad,
+                                            prefix=colorstr('train: '),
+                                            shuffle=True,
+                                            min_items=opt.min_items)
     labels = np.concatenate(dataset.labels, 0)
     mlc = int(labels[:, 0].max())  # max label class
     assert mlc < nc, f'Label class {mlc} exceeds nc={nc} in {data}. Possible class labels are 0-{nc - 1}'
@@ -246,6 +264,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     student_model.hyp = hyp  # attach hyperparameters to model
     student_model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc  # attach class weights
     student_model.names = names
+    teacher_model = deepcopy(student_model)
 
     # Start training
     t0 = time.time()
@@ -267,7 +286,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         callbacks.run('on_train_epoch_start')
         student_model.train()
-
         # Update image weights (optional, single-GPU only)
         if opt.image_weights:
             cw = student_model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # class weights
@@ -289,18 +307,20 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         if RANK in {-1, 0}:
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)  # progress bar
         student_optimizer.zero_grad()
-        for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+        target_iter = iter(cycle(unsupervised_loader))
+
+        for i, (imgs, source_labels, paths, _) in pbar:  # batch -------------------------------------------------------------
+            target_imgs, target_labels, target_paths, _ = next(target_iter)
             callbacks.run('on_train_batch_start')
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs_student = add_random_noise(imgs)
             imgs_teacher = add_random_noise(imgs)
 
-            imgs = imgs.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
+            imgs_student = imgs_student.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
+            imgs_teacher = imgs_teacher.to(device, non_blocking=True).float() / 255
 
+            ### hmm, đây đang là unsupervised learning, thì làm sao có mấy cái nhãn để tính loss bình thường được nhỉ
 
-            # teacher, student model both training with source data
-            # after that, give the teacher what -> give the teacher the unlabeled data
-            #
             # Warmup
             if ni <= nw:
                 xi = [0, nw]  # x interp
@@ -315,15 +335,15 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             # Multi-scale
             if opt.multi_scale:
                 sz = random.randrange(imgsz * 0.5, imgsz * 1.5 + gs) // gs * gs  # size
-                sf = sz / max(imgs.shape[2:])  # scale factor
+                sf = sz / max(imgs_student.shape[2:])  # scale factor
                 if sf != 1:
-                    ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
-                    imgs = nn.functional.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
+                    ns = [math.ceil(x * sf / gs) * gs for x in imgs_student.shape[2:]]  # new shape (stretched to gs-multiple)
+                    imgs_student = nn.functional.interpolate(imgs_student, size=ns, mode='bilinear', align_corners=False)
 
             # Forward
             with torch.cuda.amp.autocast(amp):
-                pred = student_model(imgs)  # forward
-                loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                pred = student_model(imgs_student)  # forward
+                loss, loss_items = compute_loss(pred, source_labels.to(device))  # loss scaled by batch_size
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
                 if opt.quad:
@@ -350,8 +370,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
                 mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
                 pbar.set_description(('%11s' * 2 + '%11.4g' * 5) %
-                                     (f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1]))
-                callbacks.run('on_train_batch_end', student_model, ni, imgs, targets, paths, list(mloss))
+                                     (f'{epoch}/{epochs - 1}', mem, *mloss, source_labels.shape[0], imgs_student.shape[-1]))
+                callbacks.run('on_train_batch_end', student_model, ni, imgs_student, source_labels, paths, list(mloss))
                 if callbacks.stop_training:
                     return
             # end batch ------------------------------------------------------------------------------------------------
