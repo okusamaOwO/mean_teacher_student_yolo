@@ -15,6 +15,7 @@ import yaml
 from torch.optim import lr_scheduler
 from tqdm import tqdm
 from helpers.add_noise import add_random_noise
+
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLO root directory
 if str(ROOT) not in sys.path:
@@ -170,7 +171,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     # EMA
     ema = ModelEMA(student_model) if RANK in {-1, 0} else None
 
-
     # Resume
     best_fitness, start_epoch = 0.0, 0
     if pretrained:
@@ -208,22 +208,22 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                               shuffle=True,
                                               min_items=opt.min_items)
     unsupervised_loader, unsupervised_dataset = create_dataloader(unlabel_data_path,
-                                            imgsz,
-                                            batch_size // WORLD_SIZE,
-                                            gs,
-                                            single_cls,
-                                            hyp=hyp,
-                                            augment=True,
-                                            cache=None if opt.cache == 'val' else opt.cache,
-                                            rect=opt.rect,
-                                            rank=LOCAL_RANK,
-                                            workers=workers,
-                                            image_weights=opt.image_weights,
-                                            close_mosaic=opt.close_mosaic != 0,
-                                            quad=opt.quad,
-                                            prefix=colorstr('train: '),
-                                            shuffle=True,
-                                            min_items=opt.min_items)
+                                                                  imgsz,
+                                                                  batch_size // WORLD_SIZE,
+                                                                  gs,
+                                                                  single_cls,
+                                                                  hyp=hyp,
+                                                                  augment=True,
+                                                                  cache=None if opt.cache == 'val' else opt.cache,
+                                                                  rect=opt.rect,
+                                                                  rank=LOCAL_RANK,
+                                                                  workers=workers,
+                                                                  image_weights=opt.image_weights,
+                                                                  close_mosaic=opt.close_mosaic != 0,
+                                                                  quad=opt.quad,
+                                                                  prefix=colorstr('train: '),
+                                                                  shuffle=True,
+                                                                  min_items=opt.min_items)
     labels = np.concatenate(dataset.labels, 0)
     mlc = int(labels[:, 0].max())  # max label class
     assert mlc < nc, f'Label class {mlc} exceeds nc={nc} in {data}. Possible class labels are 0-{nc - 1}'
@@ -286,6 +286,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         callbacks.run('on_train_epoch_start')
         student_model.train()
+        teacher_model.train()
         # Update image weights (optional, single-GPU only)
         if opt.image_weights:
             cw = student_model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # class weights
@@ -309,16 +310,18 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         student_optimizer.zero_grad()
         target_iter = iter(cycle(unsupervised_loader))
 
-        for i, (imgs, source_labels, paths, _) in pbar:  # batch -------------------------------------------------------------
-            target_imgs, target_labels, target_paths, _ = next(target_iter)
+        for i, (
+                source_imgs, source_labels, paths,
+                _) in pbar:  # batch -------------------------------------------------------------
+            target_imgs, _, target_paths, _ = next(target_iter)
             callbacks.run('on_train_batch_start')
             ni = i + nb * epoch  # number integrated batches (since train start)
-            imgs_student = add_random_noise(imgs)
-            imgs_teacher = add_random_noise(imgs)
+            imgs_student = add_random_noise(target_imgs)
+            imgs_teacher = add_random_noise(target_imgs)
 
-            imgs_student = imgs_student.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
+            source_imgs = source_imgs.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
             imgs_teacher = imgs_teacher.to(device, non_blocking=True).float() / 255
-
+            imgs_student = imgs_student.to(device, non_blocking=True).float() / 255
             ### hmm, đây đang là unsupervised learning, thì làm sao có mấy cái nhãn để tính loss bình thường được nhỉ
 
             # Warmup
@@ -335,22 +338,34 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             # Multi-scale
             if opt.multi_scale:
                 sz = random.randrange(imgsz * 0.5, imgsz * 1.5 + gs) // gs * gs  # size
-                sf = sz / max(imgs_student.shape[2:])  # scale factor
+                sf = sz / max(source_imgs.shape[2:])  # scale factor
                 if sf != 1:
-                    ns = [math.ceil(x * sf / gs) * gs for x in imgs_student.shape[2:]]  # new shape (stretched to gs-multiple)
-                    imgs_student = nn.functional.interpolate(imgs_student, size=ns, mode='bilinear', align_corners=False)
+                    ns = [math.ceil(x * sf / gs) * gs for x in
+                          source_imgs.shape[2:]]  # new shape (stretched to gs-multiple)
+                    source_imgs = nn.functional.interpolate(source_imgs, size=ns, mode='bilinear',
+                                                            align_corners=False)
 
             # Forward
             with torch.cuda.amp.autocast(amp):
-                pred = student_model(imgs_student)  # forward
-                loss, loss_items = compute_loss(pred, source_labels.to(device))  # loss scaled by batch_size
+                # supervised learning with source data
+                student_pred = student_model(source_imgs)  # student forward
+                supervised_loss, supervised_loss_items = compute_loss(student_pred, source_labels.to(
+                    device))  # loss scaled by batch_size
+
+                # unsupervised learning with target data
+                student_pred_target = student_model(imgs_student)
+                teacher_generated_labels = teacher_model(imgs_teacher)
+                unsupervised_loss, unsupervised_loss_items = compute_loss(student_pred_target, teacher_generated_labels)
+
+                total_loss = supervised_loss + unsupervised_loss
+                # unsupervised learning with target data
                 if RANK != -1:
-                    loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
+                    total_loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
                 if opt.quad:
-                    loss *= 4.
+                    total_loss *= 4.
 
             # Backward
-            scaler.scale(loss).backward()
+            scaler.scale(total_loss).backward()
 
             # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
             if ni - last_opt_step >= accumulate:
@@ -370,8 +385,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
                 mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
                 pbar.set_description(('%11s' * 2 + '%11.4g' * 5) %
-                                     (f'{epoch}/{epochs - 1}', mem, *mloss, source_labels.shape[0], imgs_student.shape[-1]))
-                callbacks.run('on_train_batch_end', student_model, ni, imgs_student, source_labels, paths, list(mloss))
+                                     (f'{epoch}/{epochs - 1}', mem, *mloss, source_labels.shape[0],
+                                      source_imgs.shape[-1]))
+                callbacks.run('on_train_batch_end', student_model, ni, source_imgs, source_labels, paths, list(mloss))
                 if callbacks.stop_training:
                     return
             # end batch ------------------------------------------------------------------------------------------------
@@ -384,7 +400,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             # mAP
             callbacks.run('on_train_epoch_end', epoch=epoch)
             ema.update_attr(student_model,
-                                          include=['yaml', 'nc', 'hyp', 'names', 'stride', 'class_weights'])
+                            include=['yaml', 'nc', 'hyp', 'names', 'stride', 'class_weights'])
             final_epoch = (epoch + 1 == epochs) or stopper.possible_stop
             if not noval or final_epoch:  # Calculate mAP
                 results, maps, _ = validate.run(data_dict,
