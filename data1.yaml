@@ -1,5 +1,5 @@
-train:
-val: /content/mean_teacher_student_yolo/drive/MyDrive/mini/val/images
+train: ./mydataset/clear/train/images
+val: ./mydataset/clear/val/images
 
 nc: 2
 names:

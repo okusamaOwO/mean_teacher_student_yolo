@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 import numpy as np
 import torch
+torch.backends.nnpack.enabled = False
+
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
@@ -97,7 +99,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     with torch_distributed_zero_first(LOCAL_RANK):
         data_dict = data_dict or check_dataset(data)  # check if None
     train_path, val_path = data_dict['train'], data_dict['val']
-    unlabel_data_path = "/content/mean_teacher_student_yolo/mini/train/images"
+    unsupervised_data_path = "/workspace/mydataset/foggy_zurich_direct/train/images"
     nc = 1 if single_cls else int(data_dict['nc'])  # number of classes
     names = {0: 'item'} if single_cls and len(data_dict['names']) != 1 else data_dict['names']  # class names
     # is_coco = isinstance(val_path, str) and val_path.endswith('coco/val2017.txt')  # COCO dataset
@@ -208,7 +210,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                               prefix=colorstr('train: '),
                                               shuffle=True,
                                               min_items=opt.min_items)
-    unsupervised_loader, unsupervised_dataset = create_dataloader(unlabel_data_path,
+    unsupervised_loader, unsupervised_dataset = create_dataloader(unsupervised_data_path,
                                                                   imgsz,
                                                                   batch_size // WORLD_SIZE,
                                                                   gs,
@@ -364,11 +366,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     # consistency_loss += torch.norm(student_tensor-teacher_tensor, p=2)
                     # consistency_loss = 1 - F.cosine_similarity(student_tensor, teacher_tensor, dim=-1).mean()
                     consistency_loss += F.smooth_l1_loss(student_tensor, teacher_tensor)
-
-                print("-" * 1000)
-                print("supervised_loss", supervised_loss)
-                print("supervised_loss", consistency_loss)
-                print("-" * 1000)
 
                 weight_for_consistency_loss = 0.005
                 total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss
