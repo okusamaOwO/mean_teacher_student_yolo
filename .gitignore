@@ -3,3 +3,8 @@
 *.pyc
 *.pt
 *.yaml
+./drive/
+./mini/
+*.txt
+*.png
+

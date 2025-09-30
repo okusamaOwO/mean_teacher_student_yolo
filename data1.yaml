@@ -1,5 +1,5 @@
-train: ./mydataset/clear/train/images
-val: ./mydataset/foggy_zurich_direct/val/images
+train: /content/mean_teacher_student_yolo/drive/MyDrive/mini/train/images
+val: /content/mean_teacher_student_yolo/drive/MyDrive/mini/val/images
 
 nc: 2
 names:
