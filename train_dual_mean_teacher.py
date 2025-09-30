@@ -50,8 +50,12 @@ LOCAL_RANK = int(os.getenv('LOCAL_RANK', -1))  # https://pytorch.org/docs/stable
 RANK = int(os.getenv('RANK', -1))
 WORLD_SIZE = int(os.getenv('WORLD_SIZE', 1))
 GIT_INFO = None  # check_git_info()
-
-
+def sigmoid_rampup(current_epoch, rampup_length):
+    if rampup_length == 0:
+        return 1.0
+    current = np.clip(current_epoch, 0.0, rampup_length)
+    phase = 1.0 - current / rampup_length
+    return float(np.exp(-5.0 * phase * phase))
 def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictionary
     save_dir, epochs, batch_size, weights, single_cls, evolve, data, cfg, resume, noval, nosave, workers, freeze = \
         Path(opt.save_dir), opt.epochs, opt.batch_size, opt.weights, opt.single_cls, opt.evolve, opt.data, opt.cfg, \
@@ -266,7 +270,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     student_model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc  # attach class weights
     student_model.names = names
     teacher_model = deepcopy(student_model)
-
+    for param in teacher_model.parameters():
+        param.requires_grad = False  # Ensure teacher doesn't need gradients
     # Start training
     t0 = time.time()
     nb = len(train_loader)  # number of batches
@@ -296,21 +301,23 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         if epoch == (epochs - opt.close_mosaic):
             LOGGER.info("Closing dataloader mosaic")
             dataset.mosaic = False
-
+        
         # Update mosaic border (optional)
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
-        mloss = torch.zeros(3, device=device)  # mean losses
+        mloss = torch.zeros(4, device=device)  # mean losses
         if RANK != -1:
             train_loader.sampler.set_epoch(epoch)
         pbar = enumerate(train_loader)
-        LOGGER.info(('\n' + '%11s' * 7) % ('Epoch', 'GPU_mem', 'box_loss', 'cls_loss', 'dfl_loss', 'Instances', 'Size'))
+        LOGGER.info(('\n' + '%11s' * 8) % (
+        'Epoch', 'GPU_mem', 'box_loss', 'cls_loss', 'dfl_loss', 'con_loss', 'Instances', 'Size'))
         if RANK in {-1, 0}:
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)  # progress bar
         student_optimizer.zero_grad()
         target_iter = iter(cycle(unsupervised_loader))
-
+        rampup_length = 20
+        weight_for_consistency_loss = opt.weight_consistency_loss * sigmoid_rampup(epoch, rampup_length)
         for i, (source_imgs, source_labels, paths,_) in pbar:  # batch -------------------------------------------------------------
             target_imgs, _, target_paths, _ = next(target_iter)
             callbacks.run('on_train_batch_start')
@@ -358,15 +365,19 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 # turn raw output of teacher model to label format
 
                 student_pred_target_main_branch = student_model(imgs_student)[0]
-                teacher_pred_target_main_branch = teacher_model(imgs_teacher)[0]
+                with torch.no_grad():
+                    teacher_pred_target_main_branch = teacher_model(imgs_teacher)[0]
                 consistency_loss = 0
                 for student_tensor, teacher_tensor in zip(student_pred_target_main_branch, teacher_pred_target_main_branch):
                     # consistency_loss += torch.norm(student_tensor-teacher_tensor, p=2)
                     # consistency_loss = 1 - F.cosine_similarity(student_tensor, teacher_tensor, dim=-1).mean()
                     consistency_loss += F.smooth_l1_loss(student_tensor, teacher_tensor)
+                combined_loss_items = torch.cat([
+                    supervised_loss_items,
+                    consistency_loss.detach().unsqueeze(0)
+                ])
+                total_loss = supervised_loss + opt.weight_consistency_loss * consistency_loss
 
-                weight_for_consistency_loss = 1
-                total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss
                 # unsupervised learning with target data
                 if RANK != -1:
                     total_loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
@@ -386,14 +397,14 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
                 if ema:
                     ema.update(student_model)
+                update_teacher(student_model, teacher_model, alpha)
                 last_opt_step = ni
 
-                update_teacher(student_model, teacher_model, alpha)
             # Log
             if RANK in {-1, 0}:
-                mloss = (mloss * i + supervised_loss_items) / (i + 1)  # update mean losses
+                mloss = (mloss * i + combined_loss_items) / (i + 1)  # update mean losses
                 mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
-                pbar.set_description(('%11s' * 2 + '%11.4g' * 5) %
+                pbar.set_description(('%11s' * 2 + '%11.4g' * 6) %
                                      (f'{epoch}/{epochs - 1}', mem, *mloss, source_labels.shape[0],
                                       source_imgs.shape[-1]))
                 callbacks.run('on_train_batch_end', student_model, ni, source_imgs, source_labels, paths, list(mloss))
@@ -538,6 +549,7 @@ def parse_opt(known=False):
     parser.add_argument('--local_rank', type=int, default=-1, help='Automatic DDP Multi-GPU argument, do not modify')
     parser.add_argument('--min-items', type=int, default=0, help='Experimental')
     parser.add_argument('--close-mosaic', type=int, default=0, help='Experimental')
+    parser.add_argument('--weight-consistency-loss', type=int, default=1, help='weight for consistency loss')
 
     # Logger arguments
     parser.add_argument('--entity', default=None, help='Entity')
