@@ -1,5 +1,5 @@
 train: ./mydataset/clear/train/images
-val: ./mydataset/clear/val/images
+val: ./mydataset/foggy_zurich_direct/val/images
 
 nc: 2
 names:

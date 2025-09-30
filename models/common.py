@@ -10,8 +10,6 @@ from copy import copy
 from pathlib import Path
 from urllib.parse import urlparse
 
-from typing import Optional
-
 import cv2
 import numpy as np
 import pandas as pd
@@ -492,9 +490,8 @@ class SPPF(nn.Module):
 
 
 import torch.nn.functional as F
-from torch.nn.modules.utils import _pair
-    
-    
+
+
 class ReOrg(nn.Module):
     # yolo
     def __init__(self):

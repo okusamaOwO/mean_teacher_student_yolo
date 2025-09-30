@@ -9,8 +9,6 @@ from datetime import datetime
 from pathlib import Path
 import numpy as np
 import torch
-torch.backends.nnpack.enabled = False
-
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
@@ -367,7 +365,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     # consistency_loss = 1 - F.cosine_similarity(student_tensor, teacher_tensor, dim=-1).mean()
                     consistency_loss += F.smooth_l1_loss(student_tensor, teacher_tensor)
 
-                weight_for_consistency_loss = 0.005
+                weight_for_consistency_loss = 1
                 total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss
                 # unsupervised learning with target data
                 if RANK != -1:
