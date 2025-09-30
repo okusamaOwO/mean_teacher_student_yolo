@@ -1,3 +1,1 @@
-import torch
-print(torch.cuda.is_available())
-print(torch.cuda.get_device_name(0))
+print("test to push changes in git from gg colab")
