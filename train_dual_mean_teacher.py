@@ -17,6 +17,7 @@ from torch.optim import lr_scheduler
 from tqdm import tqdm
 from helpers.add_noise import add_random_noise
 from helpers.update_teacher import update_teacher
+
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLO root directory
 if str(ROOT) not in sys.path:
@@ -50,12 +51,16 @@ LOCAL_RANK = int(os.getenv('LOCAL_RANK', -1))  # https://pytorch.org/docs/stable
 RANK = int(os.getenv('RANK', -1))
 WORLD_SIZE = int(os.getenv('WORLD_SIZE', 1))
 GIT_INFO = None  # check_git_info()
+
+
 def sigmoid_rampup(current_epoch, rampup_length):
     if rampup_length == 0:
         return 1.0
     current = np.clip(current_epoch, 0.0, rampup_length)
     phase = 1.0 - current / rampup_length
     return float(np.exp(-5.0 * phase * phase))
+
+
 def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictionary
     save_dir, epochs, batch_size, weights, single_cls, evolve, data, cfg, resume, noval, nosave, workers, freeze = \
         Path(opt.save_dir), opt.epochs, opt.batch_size, opt.weights, opt.single_cls, opt.evolve, opt.data, opt.cfg, \
@@ -301,7 +306,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         if epoch == (epochs - opt.close_mosaic):
             LOGGER.info("Closing dataloader mosaic")
             dataset.mosaic = False
-        
+
         # Update mosaic border (optional)
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
@@ -311,14 +316,15 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             train_loader.sampler.set_epoch(epoch)
         pbar = enumerate(train_loader)
         LOGGER.info(('\n' + '%11s' * 8) % (
-        'Epoch', 'GPU_mem', 'box_loss', 'cls_loss', 'dfl_loss', 'con_loss', 'Instances', 'Size'))
+            'Epoch', 'GPU_mem', 'box_loss', 'cls_loss', 'dfl_loss', 'con_loss', 'Instances', 'Size'))
         if RANK in {-1, 0}:
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)  # progress bar
         student_optimizer.zero_grad()
         target_iter = iter(cycle(unsupervised_loader))
         rampup_length = 20
         weight_for_consistency_loss = opt.weight_consistency_loss * sigmoid_rampup(epoch, rampup_length)
-        for i, (source_imgs, source_labels, paths,_) in pbar:  # batch -------------------------------------------------------------
+        for i, (source_imgs, source_labels, paths,
+                _) in pbar:  # batch -------------------------------------------------------------
             target_imgs, _, target_paths, _ = next(target_iter)
             callbacks.run('on_train_batch_start')
             ni = i + nb * epoch  # number integrated batches (since train start)
@@ -359,7 +365,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             with torch.cuda.amp.autocast(amp):
                 # supervised learning with source data
                 student_pred = student_model(source_imgs)  # student forward
-                supervised_loss, supervised_loss_items = compute_loss(student_pred, source_labels.to(device))  # loss scaled by batch_size
+                supervised_loss, supervised_loss_items = compute_loss(student_pred, source_labels.to(
+                    device))  # loss scaled by batch_size
 
                 # unsupervised learning with target data
                 # turn raw output of teacher model to label format
@@ -368,16 +375,21 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 with torch.no_grad():
                     teacher_pred_target_main_branch = teacher_model(imgs_teacher)[0]
                 consistency_loss = 0
-                for student_tensor, teacher_tensor in zip(student_pred_target_main_branch, teacher_pred_target_main_branch):
+                num_heads = len(student_pred_target_main_branch)
+                for student_tensor, teacher_tensor in zip(student_pred_target_main_branch,
+                                                          teacher_pred_target_main_branch):
                     # consistency_loss += torch.norm(student_tensor-teacher_tensor, p=2)
                     # consistency_loss = 1 - F.cosine_similarity(student_tensor, teacher_tensor, dim=-1).mean()
-                    consistency_loss += F.smooth_l1_loss(student_tensor, teacher_tensor)
+                    consistency_loss += F.smooth_l1_loss(student_tensor, teacher_tensor, reduction='mean')
                 combined_loss_items = torch.cat([
                     supervised_loss_items,
                     consistency_loss.detach().unsqueeze(0)
                 ])
-                total_loss = supervised_loss + opt.weight_consistency_loss * consistency_loss
-
+                consistency_loss = consistency_loss / num_heads
+                print("-" * 100)
+                print(consistency_loss)
+                total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss
+                print(weight_for_consistency_loss)
                 # unsupervised learning with target data
                 if RANK != -1:
                     total_loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
