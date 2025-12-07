@@ -277,6 +277,13 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     teacher_model = deepcopy(student_model)
     for param in teacher_model.parameters():
         param.requires_grad = False  # Ensure teacher doesn't need gradients
+    # getting feature maps
+    feature_maps = {}
+    def get_activation(name):
+        def hook(model, input, output):
+            feature_maps[name] = output.detach()
+        return hook
+    hook_handle = de_parallel(student_model).model[0].register_forward_hook(get_activation('layer0'))
     # Start training
     t0 = time.time()
     nb = len(train_loader)  # number of batches
@@ -294,6 +301,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 f'Using {train_loader.num_workers * WORLD_SIZE} dataloader workers\n'
                 f"Logging results to {colorstr('bold', save_dir)}\n"
                 f'Starting training for {epochs} epochs...')
+    
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         callbacks.run('on_train_epoch_start')
         student_model.train()
@@ -365,6 +373,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             with torch.cuda.amp.autocast(amp):
                 # supervised learning with source data
                 student_pred = student_model(source_imgs)  # student forward
+                feat_clear = feature_maps['layer0']
+                print("feature map shape:", feat_clear.shape)
                 supervised_loss, supervised_loss_items = compute_loss(student_pred, source_labels.to(
                     device))  # loss scaled by batch_size
 
@@ -372,6 +382,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 # turn raw output of teacher model to label format
 
                 student_pred_target_main_branch = student_model(imgs_student)[0]
+                feat_foggy = feature_maps['layer0']
+                print("feature map shape:", feat_foggy.shape)
+                exit()
                 with torch.no_grad():
                     teacher_pred_target_main_branch = teacher_model(imgs_teacher)[0]
                 consistency_loss = 0
@@ -512,6 +525,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                         callbacks.run('on_fit_epoch_end', list(mloss) + list(results) + lr, epoch, best_fitness, fi)
 
         callbacks.run('on_train_end', last, best, epoch, results)
+    hook_handle.remove()
 
     torch.cuda.empty_cache()
     return results
