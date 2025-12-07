@@ -12,6 +12,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.nn.utils.spectral_norm as spectral_norm
 import yaml
 from torch.optim import lr_scheduler
 from tqdm import tqdm
@@ -51,6 +52,65 @@ LOCAL_RANK = int(os.getenv('LOCAL_RANK', -1))  # https://pytorch.org/docs/stable
 RANK = int(os.getenv('RANK', -1))
 WORLD_SIZE = int(os.getenv('WORLD_SIZE', 1))
 GIT_INFO = None  # check_git_info()
+
+class StyleDiscriminator(nn.Module):
+    def __init__(self, num_channels=32):
+        super(StyleDiscriminator, self).__init__()
+        
+        # Input size is simply C * C
+        input_dim = num_channels * num_channels
+        
+        self.model = nn.Sequential(
+            # Layer 1: Compress from 1024 -> 512
+            # spectral_norm helps stabilize GAN-like training
+            spectral_norm(nn.Linear(input_dim, 512)),
+            nn.LeakyReLU(0.2, inplace=True),
+            
+            # Layer 2: 512 -> 256
+            spectral_norm(nn.Linear(512, 256)),
+            nn.LeakyReLU(0.2, inplace=True),
+            
+            # Layer 3: 256 -> 1 (Output Logit)
+            spectral_norm(nn.Linear(256, 1))
+            # No Sigmoid here! We use BCEWithLogitsLoss for better stability
+        )
+
+    def forward(self, x):
+        # x shape: [Batch_Size, C, C] -> Flatten to [Batch_Size, C*C]
+        x = x.view(x.size(0), -1)
+        return self.model(x)
+
+def gram_matrix(y):
+    (b, ch, h, w) = y.size()
+    features = y.view(b, ch, w * h)
+    gram = torch.bmm(features, features.transpose(1, 2))
+    return gram / (ch * h * w)
+
+class SafeGramMatrix(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Force the spatial size to 64x64 before calculating Gram
+        self.pool = nn.AdaptiveAvgPool2d((64, 64))
+
+    def forward(self, y):
+        # 1. Downsample: [B, 32, 320, 320] -> [B, 32, 64, 64]
+        y = self.pool(y)
+        print(f"Shape after feature maps: {y.shape}")
+        print(f"Feature maps: {y}")
+
+        (b, ch, h, w) = y.size()
+        
+        print(f"This is the second channel dimension {y[:,1,:,:]}")
+        # 2. Flatten: [B, 32, 4096]
+        features = y.view(b, ch, w * h)
+        
+        # 3. Calculate Gram (Use float32 for safety!)
+        # Even with pooling, squaring numbers can still be large, so float32 is safest.
+        features = features.float() 
+        gram = torch.bmm(features, features.transpose(1, 2))
+        
+        # 4. Normalize
+        return gram / (ch * h * w)
 
 
 def sigmoid_rampup(current_epoch, rampup_length):
@@ -148,7 +208,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     if RANK == -1 and batch_size == -1:  # single-GPU only, estimate best batch size
         batch_size_student = check_train_batch_size(student_model, imgsz, amp)
         loggers.on_params_update({"batch_size": batch_size_student})
-
+    
     # Optimizer
     nbs = 64  # nominal batch size
     accumulate = max(round(nbs / batch_size), 1)  # accumulate loss before optimizing
@@ -296,12 +356,18 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
     stopper, stop = EarlyStopping(patience=opt.patience), False
     compute_loss = ComputeLoss(student_model)  # init loss class
+
+    # discriminator 
+    style_discriminator = None
+    d_optimizer = None
+    criterion_gan = nn.BCEWithLogitsLoss()
+
     callbacks.run('on_train_start')
     LOGGER.info(f'Image sizes {imgsz} train, {imgsz} val\n'
                 f'Using {train_loader.num_workers * WORLD_SIZE} dataloader workers\n'
                 f"Logging results to {colorstr('bold', save_dir)}\n"
                 f'Starting training for {epochs} epochs...')
-    
+    extractor = SafeGramMatrix()
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         callbacks.run('on_train_epoch_start')
         student_model.train()
@@ -370,21 +436,17 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                                              align_corners=False)
 
             # Forward
-            with torch.cuda.amp.autocast(amp):
-                # supervised learning with source data
+            with torch.cuda.amp.autocast(enabled=False):
+                #  SUPERVISED LOSS
                 student_pred = student_model(source_imgs)  # student forward
                 feat_clear = feature_maps['layer0']
-                print("feature map shape:", feat_clear.shape)
+ 
                 supervised_loss, supervised_loss_items = compute_loss(student_pred, source_labels.to(
                     device))  # loss scaled by batch_size
 
-                # unsupervised learning with target data
-                # turn raw output of teacher model to label format
-
+                # CONSISTENCY LOSS
                 student_pred_target_main_branch = student_model(imgs_student)[0]
                 feat_foggy = feature_maps['layer0']
-                print("feature map shape:", feat_foggy.shape)
-                exit()
                 with torch.no_grad():
                     teacher_pred_target_main_branch = teacher_model(imgs_teacher)[0]
                 consistency_loss = 0
@@ -398,11 +460,36 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     supervised_loss_items,
                     consistency_loss.detach().unsqueeze(0)
                 ])
+
+                # STYLE DISCRIMINATOR 
+                if style_discriminator is None:
+                    ch_dim = feat_clear.shape[1]
+                    style_discriminator = StyleDiscriminator(num_channels=ch_dim).to(device)
+                    d_optimizer = torch.optim.Adam(style_discriminator.parameters(), lr=1e-4, betas=(0.5, 0.999))
+                    LOGGER.info(f"Style Discriminator initialized with {ch_dim} channels.")
+                gram_clear = extractor(feat_clear).float()
+                gram_foggy = extractor(feat_foggy).float()
+                for p in style_discriminator.parameters():
+                    p.requires_grad = True
+                d_optimizer.zero_grad()
+                pred_real = style_discriminator(gram_clear.detach())
+                loss_d_real = criterion_gan(pred_real, torch.ones_like(pred_real))
+                pred_fake = style_discriminator(gram_foggy.detach())
+                loss_d_fake = criterion_gan(pred_fake, torch.zeros_like(pred_fake))
+                loss_d = (loss_d_real + loss_d_fake) * 0.5
+                loss_d.backward()
+                d_optimizer.step()
+                for p in style_discriminator.parameters():
+                    p.requires_grad = False
+
+                pred_style = style_discriminator(gram_foggy)
+                loss_g_style = criterion_gan(pred_style, torch.ones_like(pred_style))
+            
                 consistency_loss = consistency_loss / num_heads
                 print("-" * 100)
-                print(consistency_loss)
-                total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss
-                print(weight_for_consistency_loss)
+                print(f"This is the consistency loss {consistency_loss}")
+                total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss + 0.1 * loss_g_style
+                print(f"This is the discriminator loss {loss_g_style}")
                 # unsupervised learning with target data
                 if RANK != -1:
                     total_loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
@@ -532,6 +619,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
 
 def parse_opt(known=False):
+
     parser = argparse.ArgumentParser()
     # parser.add_argument('--weights', type=str, default=ROOT / 'yolo.pt', help='initial weights path')
     # parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
