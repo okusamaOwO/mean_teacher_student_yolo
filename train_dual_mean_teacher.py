@@ -105,8 +105,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     init_seeds(opt.seed + 1 + RANK, deterministic=True)
     with torch_distributed_zero_first(LOCAL_RANK):
         data_dict = data_dict or check_dataset(data)  # check if None
-    train_path, val_path = data_dict['train'], data_dict['val']
-    unsupervised_data_path = "/content/mean_teacher_student_yolo/mini/train/images"
+    train_path, val_path, unsupervised_data_path = data_dict['train'], data_dict['val'], data_dict['foggy_zurich']
+    # unsupervised_data_path = "/content/mean_teacher_student_yolo/mini/train/images"
     nc = 1 if single_cls else int(data_dict['nc'])  # number of classes
     names = {0: 'item'} if single_cls and len(data_dict['names']) != 1 else data_dict['names']  # class names
     # is_coco = isinstance(val_path, str) and val_path.endswith('coco/val2017.txt')  # COCO dataset
@@ -439,7 +439,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                                 batch_size=batch_size // WORLD_SIZE * 2,
                                                 imgsz=imgsz,
                                                 half=amp,
-                                                model=ema.ema,
+                                                model=teacher_model,
                                                 single_cls=single_cls,
                                                 dataloader=val_loader,
                                                 save_dir=save_dir,
@@ -460,7 +460,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 ckpt = {
                     'epoch': epoch,
                     'best_fitness': best_fitness,
-                    'model': deepcopy(de_parallel(student_model)).half(),
+                    'model': deepcopy(de_parallel(teacher_model)).half(),
                     'ema': deepcopy(ema.ema).half(),
                     'updates': ema.updates,
                     'optimizer': student_optimizer.state_dict(),
