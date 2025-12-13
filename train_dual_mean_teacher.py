@@ -7,12 +7,15 @@ import time
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.utils.spectral_norm as spectral_norm
+import torchvision.transforms.functional as TF
+
 import yaml
 from torch.optim import lr_scheduler
 from tqdm import tqdm
@@ -52,65 +55,74 @@ LOCAL_RANK = int(os.getenv('LOCAL_RANK', -1))  # https://pytorch.org/docs/stable
 RANK = int(os.getenv('RANK', -1))
 WORLD_SIZE = int(os.getenv('WORLD_SIZE', 1))
 GIT_INFO = None  # check_git_info()
+def save_mixed_images(mixed_source_imgs, mixed_target_imgs, save_dir, epoch, batch_idx):
+    """
+    Save individual images from mixed_source_imgs and mixed_target_imgs
+    Args:
+        mixed_source_imgs: mixed source images [B, C, H, W] (normalized 0-1)
+        mixed_target_imgs: mixed target images [B, C, H, W] (normalized 0-1)
+        save_dir: directory to save images
+        epoch: current epoch number
+        batch_idx: current batch index
+    """
+    # Create directory if it doesn't exist
+    epoch_dir = Path(save_dir) / f'epoch_{epoch}' / f'batch_{batch_idx}'
+    epoch_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save mixed source images
+    for i, img_tensor in enumerate(mixed_source_imgs):
+        # Clamp to [0, 1] and convert to PIL
+        img_pil = TF.to_pil_image(img_tensor.cpu().clamp(0, 1))
+        save_path = epoch_dir / f'source{i+1}.png'
+        img_pil.save(save_path)
+    
+    # Save mixed target images
+    for i, img_tensor in enumerate(mixed_target_imgs):
+        # Clamp to [0, 1] and convert to PIL
+        img_pil = TF.to_pil_image(img_tensor.cpu().clamp(0, 1))
+        save_path = epoch_dir / f'target{i+1}.png'
+        img_pil.save(save_path)
+    
+    LOGGER.info(f'Saved {len(mixed_source_imgs)} source and {len(mixed_target_imgs)} target images to {epoch_dir}')
 
-class StyleDiscriminator(nn.Module):
-    def __init__(self, num_channels=32):
-        super(StyleDiscriminator, self).__init__()
-        
-        # Input size is simply C * C
-        input_dim = num_channels * num_channels
-        
-        self.model = nn.Sequential(
-            # Layer 1: Compress from 1024 -> 512
-            # spectral_norm helps stabilize GAN-like training
-            spectral_norm(nn.Linear(input_dim, 512)),
-            nn.LeakyReLU(0.2, inplace=True),
-            
-            # Layer 2: 512 -> 256
-            spectral_norm(nn.Linear(512, 256)),
-            nn.LeakyReLU(0.2, inplace=True),
-            
-            # Layer 3: 256 -> 1 (Output Logit)
-            spectral_norm(nn.Linear(256, 1))
-            # No Sigmoid here! We use BCEWithLogitsLoss for better stability
-        )
+def mixstyle_cross_domain(x1, x2, alpha=0.1, eps=1e-6):
+    """
+    MixStyle implementation for explicit cross-domain mixing
+    Args:
+        x1: first batch [B, C, H, W] 
+        x2: second batch [B, C, H, W] (different domain order)
+        alpha: interpolation strength
+        eps: small value to avoid division by zero
+    """
+    if not x1.requires_grad:
+        return x1
+    
+    B = x1.size(0)
+    if B < 2:
+        return x1
+    
+    # Compute instance statistics for both batches
+    mu1 = x1.mean(dim=[2, 3], keepdim=True)
+    var1 = x1.var(dim=[2, 3], keepdim=True)
+    sig1 = (var1 + eps).sqrt()
+    
+    mu2 = x2.mean(dim=[2, 3], keepdim=True)
+    var2 = x2.var(dim=[2, 3], keepdim=True)
+    sig2 = (var2 + eps).sqrt()
+    
+    # Normalize x1
+    x1_normed = (x1 - mu1) / sig1
+    
+    # Generate mixing weight
+    lmda = torch.distributions.Beta(alpha, alpha).sample((B, 1, 1, 1)).to(x1.device)
+    
+    # Mix statistics between x1 and x2 (guaranteed cross-domain)
+    mu_mix = lmda * mu1 + (1 - lmda) * mu2
+    sig_mix = lmda * sig1 + (1 - lmda) * sig2
+    
+    # Apply mixed statistics to x1
+    return x1_normed * sig_mix + mu_mix
 
-    def forward(self, x):
-        # x shape: [Batch_Size, C, C] -> Flatten to [Batch_Size, C*C]
-        x = x.view(x.size(0), -1)
-        return self.model(x)
-
-def gram_matrix(y):
-    (b, ch, h, w) = y.size()
-    features = y.view(b, ch, w * h)
-    gram = torch.bmm(features, features.transpose(1, 2))
-    return gram / (ch * h * w)
-
-class SafeGramMatrix(nn.Module):
-    def __init__(self):
-        super().__init__()
-        # Force the spatial size to 64x64 before calculating Gram
-        self.pool = nn.AdaptiveAvgPool2d((64, 64))
-
-    def forward(self, y):
-        # 1. Downsample: [B, 32, 320, 320] -> [B, 32, 64, 64]
-        y = self.pool(y)
-        print(f"Shape after feature maps: {y.shape}")
-        print(f"Feature maps: {y}")
-
-        (b, ch, h, w) = y.size()
-        
-        print(f"This is the second channel dimension {y[:,1,:,:]}")
-        # 2. Flatten: [B, 32, 4096]
-        features = y.view(b, ch, w * h)
-        
-        # 3. Calculate Gram (Use float32 for safety!)
-        # Even with pooling, squaring numbers can still be large, so float32 is safest.
-        features = features.float() 
-        gram = torch.bmm(features, features.transpose(1, 2))
-        
-        # 4. Normalize
-        return gram / (ch * h * w)
 
 
 def sigmoid_rampup(current_epoch, rampup_length):
@@ -343,7 +355,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         def hook(model, input, output):
             feature_maps[name] = output.detach()
         return hook
-    hook_handle = de_parallel(student_model).model[0].register_forward_hook(get_activation('layer0'))
+    hook_handle = de_parallel(student_model).model[0].register_forward_hook(get_activation('layer1'))
     # Start training
     t0 = time.time()
     nb = len(train_loader)  # number of batches
@@ -358,16 +370,13 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     compute_loss = ComputeLoss(student_model)  # init loss class
 
     # discriminator 
-    style_discriminator = None
-    d_optimizer = None
-    criterion_gan = nn.BCEWithLogitsLoss()
+    mse_loss = nn.MSELoss()
 
     callbacks.run('on_train_start')
     LOGGER.info(f'Image sizes {imgsz} train, {imgsz} val\n'
                 f'Using {train_loader.num_workers * WORLD_SIZE} dataloader workers\n'
                 f"Logging results to {colorstr('bold', save_dir)}\n"
                 f'Starting training for {epochs} epochs...')
-    extractor = SafeGramMatrix()
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         callbacks.run('on_train_epoch_start')
         student_model.train()
@@ -404,11 +413,24 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs_student = add_random_noise(target_imgs)
             imgs_teacher = add_random_noise(target_imgs)
-
+            source_imgs = add_random_noise(source_imgs) 
             source_imgs = source_imgs.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
             imgs_teacher = imgs_teacher.to(device, non_blocking=True).float() / 255
             imgs_student = imgs_student.to(device, non_blocking=True).float() / 255
+
+            X1 = torch.cat((source_imgs, imgs_student), 0)
+            X2 = torch.cat((imgs_student, source_imgs), 0) 
+            B_total = X1.size(0)
+            B_source = source_imgs.size(0)
+            B_target = imgs_student.size(0)
+            mixed_batch = mixstyle_cross_domain(X1, X2, alpha=0.3)
+            mixed_source_imgs = mixed_batch[:B_source]      # These are the manipulated source images
+            mixed_target_imgs = mixed_batch[B_source:]      # These are the manipulated target images
             ### hmm, đây đang là unsupervised learning, thì làm sao có mấy cái nhãn để tính loss bình thường được nhỉ
+            source_imgs = torch.cat((source_imgs, mixed_source_imgs), 0)  # [original_source, mixed_source]
+            target_imgs = torch.cat((imgs_student, mixed_target_imgs), 0)  # [original_target, mixed_target]
+            teacher_imgs = torch.cat((imgs_teacher, mixed_target_imgs), 0)  # [original_teacher, mixed_target]
+            source_labels = torch.cat((source_labels, source_labels), 0)  # Duplicate labels for both original and mixed
 
             # Warmup
             if ni <= nw:
@@ -439,14 +461,14 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             with torch.cuda.amp.autocast(enabled=False):
                 #  SUPERVISED LOSS
                 student_pred = student_model(source_imgs)  # student forward
-                feat_clear = feature_maps['layer0']
+                feat_clear = feature_maps['layer1']
  
                 supervised_loss, supervised_loss_items = compute_loss(student_pred, source_labels.to(
                     device))  # loss scaled by batch_size
 
                 # CONSISTENCY LOSS
                 student_pred_target_main_branch = student_model(imgs_student)[0]
-                feat_foggy = feature_maps['layer0']
+                feat_foggy = feature_maps['layer1']
                 with torch.no_grad():
                     teacher_pred_target_main_branch = teacher_model(imgs_teacher)[0]
                 consistency_loss = 0
@@ -461,35 +483,11 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     consistency_loss.detach().unsqueeze(0)
                 ])
 
-                # STYLE DISCRIMINATOR 
-                if style_discriminator is None:
-                    ch_dim = feat_clear.shape[1]
-                    style_discriminator = StyleDiscriminator(num_channels=ch_dim).to(device)
-                    d_optimizer = torch.optim.Adam(style_discriminator.parameters(), lr=1e-4, betas=(0.5, 0.999))
-                    LOGGER.info(f"Style Discriminator initialized with {ch_dim} channels.")
-                gram_clear = extractor(feat_clear).float()
-                gram_foggy = extractor(feat_foggy).float()
-                for p in style_discriminator.parameters():
-                    p.requires_grad = True
-                d_optimizer.zero_grad()
-                pred_real = style_discriminator(gram_clear.detach())
-                loss_d_real = criterion_gan(pred_real, torch.ones_like(pred_real))
-                pred_fake = style_discriminator(gram_foggy.detach())
-                loss_d_fake = criterion_gan(pred_fake, torch.zeros_like(pred_fake))
-                loss_d = (loss_d_real + loss_d_fake) * 0.5
-                loss_d.backward()
-                d_optimizer.step()
-                for p in style_discriminator.parameters():
-                    p.requires_grad = False
+                # MIXED STYLE 
 
-                pred_style = style_discriminator(gram_foggy)
-                loss_g_style = criterion_gan(pred_style, torch.ones_like(pred_style))
-            
-                consistency_loss = consistency_loss / num_heads
-                print("-" * 100)
-                print(f"This is the consistency loss {consistency_loss}")
-                total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss + 0.1 * loss_g_style
-                print(f"This is the discriminator loss {loss_g_style}")
+
+
+                total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss
                 # unsupervised learning with target data
                 if RANK != -1:
                     total_loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
