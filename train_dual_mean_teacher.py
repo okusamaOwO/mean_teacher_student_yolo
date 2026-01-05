@@ -201,7 +201,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         student_model = Model(cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
 
     amp = check_amp(student_model)  # check AMP of these two models
-
     # Freeze
     freeze = [f'model.{x}.' for x in (freeze if len(freeze) > 1 else range(freeze[0]))]  # layers to freeze
 
@@ -458,7 +457,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                                              align_corners=False)
 
             # Forward
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.cuda.amp.autocast(amp):
                 #  SUPERVISED LOSS
                 student_pred = student_model(source_imgs)  # student forward
                 feat_clear = feature_maps['layer1']
