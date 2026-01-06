@@ -205,9 +205,48 @@ def parse_opt(known=False):
     return parser.parse_known_args()[0] if known else parser.parse_args()
 
 
+def mixstyle_cross_domain(x1, x2, alpha=0.1, eps=1e-6):
+    """
+    MixStyle implementation for explicit cross-domain mixing
+    Args:
+        x1: first batch [B, C, H, W] 
+        x2: second batch [B, C, H, W] (different domain order)
+        alpha: interpolation strength
+        eps: small value to avoid division by zero
+    """
+    B = x1.size(0)
+    if B < 2:
+        return x1
+
+    # Compute instance statistics for both batches
+    mu1 = x1.mean(dim=[2, 3], keepdim=True)
+    var1 = x1.var(dim=[2, 3], keepdim=True)
+    sig1 = (var1 + eps).sqrt()
+
+    mu2 = x2.mean(dim=[2, 3], keepdim=True)
+    var2 = x2.var(dim=[2, 3], keepdim=True)
+    sig2 = (var2 + eps).sqrt()
+
+    # Normalize x1
+    x1_normed = (x1 - mu1) / sig1
+
+    # Generate mixing weight
+    # Use torch.distributions.Beta if available or numpy
+    # Ensure device compatibility
+    lmda = torch.distributions.Beta(
+        alpha, alpha).sample((B, 1, 1, 1)).to(x1.device)
+
+    # Mix statistics between x1 and x2 (guaranteed cross-domain)
+    mu_mix = lmda * mu1 + (1 - lmda) * mu2
+    sig_mix = lmda * sig1 + (1 - lmda) * sig2
+
+    # Apply mixed statistics to x1
+    return x1_normed * sig_mix + mu_mix
+
+
 def visualize_styles(train_loader, unsupervised_loader, save_dir, num_samples=500):
     """
-    Visualizes the style statistics (mean and std) of images from two domains using t-SNE.
+    Visualizes the style statistics (mean and std) of images from 4 domains (Source, Target, Mixed Source, Mixed Target) using t-SNE.
 
     Args:
         train_loader: Dataloader for the clear domain (labeled).
@@ -218,48 +257,95 @@ def visualize_styles(train_loader, unsupervised_loader, save_dir, num_samples=50
     print(
         f"Collecting {num_samples} samples from each domain for style visualization...")
 
-    def get_style_stats(loader, label_name):
-        styles = []
-        count = 0
-        pbar = tqdm(loader, desc=f"Extracting styles from {label_name}")
-        for imgs, _, _, _ in pbar:
-            # imgs is [B, C, H, W], values 0-255 (usually uint8 or float)
-            # Normalize to 0-1 for standard stats calculation
-            imgs = imgs.float() / 255.0
+    styles_clear = []
+    styles_foggy = []
+    styles_mixed_clear = []
+    styles_mixed_foggy = []
 
-            # Compute Mean and Std per channel for each image in the batch
-            # Mean: [B, C], Std: [B, C]
-            mu = imgs.mean(dim=[2, 3])
-            std = imgs.std(dim=[2, 3])
+    count = 0
+    pbar = tqdm(total=num_samples, desc="Collecting samples")
 
-            # Concatenate to form style vector: [B, 2*C] (e.g., 6 dims for RGB)
-            # R_mean, G_mean, B_mean, R_std, G_std, B_std
-            batch_styles = torch.cat([mu, std], dim=1).cpu().numpy()
+    iter_clear = iter(train_loader)
+    iter_foggy = iter(unsupervised_loader)
 
-            styles.append(batch_styles)
-            count += imgs.shape[0]
-            if count >= num_samples:
-                break
-        return np.concatenate(styles, axis=0)[:num_samples]
+    def compute_stats(x):
+        # Mean: [B, C], Std: [B, C]
+        mu = x.mean(dim=[2, 3])
+        std = x.std(dim=[2, 3])
+        return torch.cat([mu, std], dim=1).detach().cpu().numpy()
 
-    # 1. Extract Styles
-    clear_styles = get_style_stats(train_loader, "Clear Domain")
-    foggy_styles = get_style_stats(unsupervised_loader, "Foggy Domain")
+    while count < num_samples:
+        try:
+            batch_c = next(iter_clear)
+        except StopIteration:
+            iter_clear = iter(train_loader)
+            batch_c = next(iter_clear)
 
-    # 2. Prepare for t-SNE
-    X = np.concatenate([clear_styles, foggy_styles], axis=0)
-    # Labels: 0 for Clear, 1 for Foggy
-    y = np.concatenate([np.zeros(len(clear_styles)),
-                       np.ones(len(foggy_styles))], axis=0)
+        try:
+            batch_f = next(iter_foggy)
+        except StopIteration:
+            iter_foggy = iter(unsupervised_loader)
+            batch_f = next(iter_foggy)
+
+        # Unpack images (batch_c[0] is images)
+        imgs_c = batch_c[0].float() / 255.0
+        imgs_f = batch_f[0].float() / 255.0
+
+        # Ensure sizes match for mixing
+        min_b = min(imgs_c.shape[0], imgs_f.shape[0])
+        if min_b < 2:
+            continue  # skip small batches
+
+        imgs_c = imgs_c[:min_b]
+        imgs_f = imgs_f[:min_b]
+
+        # X1 = torch.cat((source_imgs, imgs_student), 0)
+        # X2 = torch.cat((imgs_student, source_imgs), 0)
+        X1 = torch.cat((imgs_c, imgs_f), 0)
+        X2 = torch.cat((imgs_f, imgs_c), 0)
+
+        mixed_batch = mixstyle_cross_domain(X1, X2, alpha=0.3)
+
+        # mixed_source_imgs = mixed_batch[:B_source]  -> mixed_c (Source content, Target style)
+        # mixed_target_imgs = mixed_batch[B_source:]  -> mixed_f (Target content, Source style)
+        mixed_c = mixed_batch[:min_b]
+        mixed_f = mixed_batch[min_b:]
+
+        # Collect stats
+        styles_clear.append(compute_stats(imgs_c))
+        styles_foggy.append(compute_stats(imgs_f))
+        styles_mixed_clear.append(compute_stats(mixed_c))
+        styles_mixed_foggy.append(compute_stats(mixed_f))
+
+        count += min_b
+        pbar.update(min_b)
+
+    pbar.close()
+
+    # Concatenate and crop
+    s_clear = np.concatenate(styles_clear, axis=0)[:num_samples]
+    s_foggy = np.concatenate(styles_foggy, axis=0)[:num_samples]
+    s_mixed_c = np.concatenate(styles_mixed_clear, axis=0)[:num_samples]
+    s_mixed_f = np.concatenate(styles_mixed_foggy, axis=0)[:num_samples]
+
+    # Prepare for t-SNE
+    X = np.concatenate([s_clear, s_foggy, s_mixed_c, s_mixed_f], axis=0)
+    # Labels: 0:Clear, 1:Foggy, 2:Mixed-Clear, 3:Mixed-Foggy
+    y = np.concatenate([
+        np.zeros(len(s_clear)),
+        np.ones(len(s_foggy)),
+        np.full(len(s_mixed_c), 2),
+        np.full(len(s_mixed_f), 3)
+    ], axis=0)
 
     print(
         f"Running t-SNE on {X.shape[0]} samples with feature dimension {X.shape[1]}...")
     tsne = TSNE(
-        n_components=2, 
-        verbose=1, 
+        n_components=2,
+        verbose=1,
         perplexity=50,        # Kept at 50 (Good for ~1500 points)
         n_iter=2000,          # Kept at 2000 (Ensures full convergence)
-        learning_rate='auto', # Let sklearn optimize the step size
+        learning_rate='auto',  # Let sklearn optimize the step size
         init='pca',           # <--- CRITICAL: Preserves global structure better than random
         metric='cosine',      # <--- CRITICAL: Better for high-dim deep features than Euclidean
         random_state=42,
@@ -267,28 +353,37 @@ def visualize_styles(train_loader, unsupervised_loader, save_dir, num_samples=50
     )
     X_embedded = tsne.fit_transform(X)
 
-    # 3. Plot
+    # Plot
     print("Plotting results...")
     plt.figure(figsize=(10, 8))
 
-    # Plot Clear Domain (blue)
+    # Plot Clear Domain
     plt.scatter(X_embedded[y == 0, 0], X_embedded[y == 0, 1],
-                c='blue', alpha=0.6, label='Clear Domain (Train)', s=20)
-    
-    # Plot Foggy Domain (red)
-    plt.scatter(X_embedded[y == 1, 0], X_embedded[y == 1, 1],
-                c='red', alpha=0.6, label='Foggy Domain (Unsupervised)', s=20)
+                c='blue', alpha=0.6, label='Clear Domain (Source)', s=20)
 
-    plt.title("t-SNE Visualization of Domain Styles (Input Image Mean/Std)")
+    # Plot Foggy Domain
+    plt.scatter(X_embedded[y == 1, 0], X_embedded[y == 1, 1],
+                c='red', alpha=0.6, label='Foggy Domain (Target)', s=20)
+
+    # Plot Mixed Clear
+    plt.scatter(X_embedded[y == 2, 0], X_embedded[y == 2, 1],
+                c='cyan', alpha=0.6, label='Mixed Clear (Source->Target Style)', s=20)
+
+    # Plot Mixed Foggy
+    plt.scatter(X_embedded[y == 3, 0], X_embedded[y == 3, 1],
+                c='orange', alpha=0.6, label='Mixed Foggy (Target->Source Style)', s=20)
+
+    plt.title("t-SNE Visualization of Domain Styles (4 Domains)")
     plt.xlabel("t-SNE Dimension 1")
     plt.ylabel("t-SNE Dimension 2")
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.3)
 
     # Save logic
-    save_path = Path(save_dir) / 'style_tsne_plot.png'
+    save_path = Path(save_dir) / 'style_tsne_plot_4_domains.png'
     plt.savefig(save_path, dpi=300)
     print(f"Style visualization saved to {save_path}")
+
 
 if __name__ == "__main__":
     opt = parse_opt()
