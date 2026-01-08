@@ -427,9 +427,15 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             mixed_source_imgs = mixed_batch[:B_source]      # These are the manipulated source images
             mixed_target_imgs = mixed_batch[B_source:]      # These are the manipulated target images
             ### hmm, đây đang là unsupervised learning, thì làm sao có mấy cái nhãn để tính loss bình thường được nhỉ
-            source_imgs = torch.cat((source_imgs, mixed_source_imgs), 0)  # [original_source, mixed_source]
+            
             target_imgs = torch.cat((imgs_student, mixed_target_imgs), 0)  # [original_target, mixed_target]
             teacher_imgs = torch.cat((imgs_teacher, mixed_target_imgs), 0)  # [original_teacher, mixed_target]
+
+            # use_mixfog = np.random.rand()
+            # if use_mixfog < 0.5:
+            #     source_imgs = mixed_source_imgs
+
+            source_imgs = torch.cat((source_imgs, mixed_source_imgs), 0)  # [original_source, mixed_source]
             source_labels = torch.cat((source_labels, source_labels), 0)  # Duplicate labels for both original and mixed
 
             # Warmup
@@ -456,9 +462,13 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                                              align_corners=False)
                     imgs_student = nn.functional.interpolate(imgs_student, size=ns, mode='bilinear',
                                                              align_corners=False)
+                    target_imgs = nn.functional.interpolate(target_imgs, size=ns, mode='bilinear',
+                                                            align_corners=False)
+                    teacher_imgs = nn.functional.interpolate(teacher_imgs, size=ns, mode='bilinear',
+                                                             align_corners=False)
 
             # Forward
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.cuda.amp.autocast(enabled=amp):
                 #  SUPERVISED LOSS
                 student_pred = student_model(source_imgs)  # student forward
                 feat_clear = feature_maps['layer1']
@@ -467,10 +477,10 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     device))  # loss scaled by batch_size
 
                 # CONSISTENCY LOSS
-                student_pred_target_main_branch = student_model(imgs_student)[0]
+                student_pred_target_main_branch = student_model(target_imgs)[0]
                 feat_foggy = feature_maps['layer1']
                 with torch.no_grad():
-                    teacher_pred_target_main_branch = teacher_model(imgs_teacher)[0]
+                    teacher_pred_target_main_branch = teacher_model(teacher_imgs)[0]
                 consistency_loss = 0
                 num_heads = len(student_pred_target_main_branch)
                 for student_tensor, teacher_tensor in zip(student_pred_target_main_branch,
