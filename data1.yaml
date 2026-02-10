@@ -1,6 +1,6 @@
 train: /content/mean_teacher_student_yolo/drive/MyDrive/mini/train/images
 val: /content/mean_teacher_student_yolo/drive/MyDrive/mini/val/images
-
+target_train: /content/mean_teacher_student_yolo/drive/MyDrive/mini/unsupervised/images
 nc: 2
 names:
   0 : person

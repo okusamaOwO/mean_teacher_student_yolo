@@ -1,12 +1,15 @@
 import torch
-@torch.no_grad()  # no gradients needed for teacher update
+
+@torch.no_grad()
 def update_teacher(student_model, teacher_model, alpha=0.99):
     """
-    Update teacher parameters as EMA of student parameters.
-    Args:
-        student_model: nn.Module – your student network
-        teacher_model: nn.Module – your teacher network
-        alpha: float – EMA decay (0.99–0.999 typical)
+    Update teacher model using exponential moving average.
+    Updates both parameters (weights) and buffers (BatchNorm stats).
     """
-    for teacher_params, student_params in zip(teacher_model.parameters(), student_model.parameters()):
-        teacher_params.data.mul_(alpha).add_(student_params.data, alpha=1 - alpha)
+    # Update parameters (weights and biases)
+    for teacher_param, student_param in zip(teacher_model.parameters(), student_model.parameters()):
+        teacher_param.data.mul_(alpha).add_(student_param.data, alpha=1 - alpha)
+    
+    # Update buffers (BatchNorm running_mean and running_var)
+    for teacher_buf, student_buf in zip(teacher_model.buffers(), student_model.buffers()):
+        teacher_buf.data.mul_(alpha).add_(student_buf.data, alpha=1 - alpha)
