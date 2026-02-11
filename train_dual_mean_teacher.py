@@ -19,8 +19,9 @@ import torchvision.transforms.functional as TF
 import yaml
 from torch.optim import lr_scheduler
 from tqdm import tqdm
-from helpers.add_noise import add_random_noise
+from helpers.add_noise import add_weak_augmentation, add_strong_augmentation
 from helpers.update_teacher import update_teacher
+from helpers.sigmoid_rampup import sigmoid_rampup
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLO root directory
@@ -55,82 +56,6 @@ LOCAL_RANK = int(os.getenv('LOCAL_RANK', -1))  # https://pytorch.org/docs/stable
 RANK = int(os.getenv('RANK', -1))
 WORLD_SIZE = int(os.getenv('WORLD_SIZE', 1))
 GIT_INFO = None  # check_git_info()
-def save_mixed_images(mixed_source_imgs, mixed_target_imgs, save_dir, epoch, batch_idx):
-    """
-    Save individual images from mixed_source_imgs and mixed_target_imgs
-    Args:
-        mixed_source_imgs: mixed source images [B, C, H, W] (normalized 0-1)
-        mixed_target_imgs: mixed target images [B, C, H, W] (normalized 0-1)
-        save_dir: directory to save images
-        epoch: current epoch number
-        batch_idx: current batch index
-    """
-    # Create directory if it doesn't exist
-    epoch_dir = Path(save_dir) / f'epoch_{epoch}' / f'batch_{batch_idx}'
-    epoch_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Save mixed source images
-    for i, img_tensor in enumerate(mixed_source_imgs):
-        # Clamp to [0, 1] and convert to PIL
-        img_pil = TF.to_pil_image(img_tensor.cpu().clamp(0, 1))
-        save_path = epoch_dir / f'source{i+1}.png'
-        img_pil.save(save_path)
-    
-    # Save mixed target images
-    for i, img_tensor in enumerate(mixed_target_imgs):
-        # Clamp to [0, 1] and convert to PIL
-        img_pil = TF.to_pil_image(img_tensor.cpu().clamp(0, 1))
-        save_path = epoch_dir / f'target{i+1}.png'
-        img_pil.save(save_path)
-    
-    LOGGER.info(f'Saved {len(mixed_source_imgs)} source and {len(mixed_target_imgs)} target images to {epoch_dir}')
-
-def mixstyle_cross_domain(x1, x2, alpha=0.1, eps=1e-6):
-    """
-    MixStyle implementation for explicit cross-domain mixing
-    Args:
-        x1: first batch [B, C, H, W] 
-        x2: second batch [B, C, H, W] (different domain order)
-        alpha: interpolation strength
-        eps: small value to avoid division by zero
-    """
-    if not x1.requires_grad:
-        return x1
-    
-    B = x1.size(0)
-    if B < 2:
-        return x1
-    
-    # Compute instance statistics for both batches
-    mu1 = x1.mean(dim=[2, 3], keepdim=True)
-    var1 = x1.var(dim=[2, 3], keepdim=True)
-    sig1 = (var1 + eps).sqrt()
-    
-    mu2 = x2.mean(dim=[2, 3], keepdim=True)
-    var2 = x2.var(dim=[2, 3], keepdim=True)
-    sig2 = (var2 + eps).sqrt()
-    
-    # Normalize x1
-    x1_normed = (x1 - mu1) / sig1
-    
-    # Generate mixing weight
-    lmda = torch.distributions.Beta(alpha, alpha).sample((B, 1, 1, 1)).to(x1.device)
-    
-    # Mix statistics between x1 and x2 (guaranteed cross-domain)
-    mu_mix = lmda * mu1 + (1 - lmda) * mu2
-    sig_mix = lmda * sig1 + (1 - lmda) * sig2
-    
-    # Apply mixed statistics to x1
-    return x1_normed * sig_mix + mu_mix
-
-
-
-def sigmoid_rampup(current_epoch, rampup_length):
-    if rampup_length == 0:
-        return 1.0
-    current = np.clip(current_epoch, 0.0, rampup_length)
-    phase = 1.0 - current / rampup_length
-    return float(np.exp(-5.0 * phase * phase))
 
 
 def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictionary
@@ -177,7 +102,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     init_seeds(opt.seed + 1 + RANK, deterministic=True)
     with torch_distributed_zero_first(LOCAL_RANK):
         data_dict = data_dict or check_dataset(data)  # check if None
-    train_path, val_path, unsupervised_data_path = data_dict['train'], data_dict['val'], data_dict['foggy_zurich']
+    train_path, val_path, unsupervised_data_path = data_dict['train'], data_dict['val'], data_dict['target_train']
     # unsupervised_data_path = "/content/mean_teacher_student_yolo/mini/train/images"
     nc = 1 if single_cls else int(data_dict['nc'])  # number of classes
     names = {0: 'item'} if single_cls and len(data_dict['names']) != 1 else data_dict['names']  # class names
@@ -206,8 +131,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     freeze = [f'model.{x}.' for x in (freeze if len(freeze) > 1 else range(freeze[0]))]  # layers to freeze
 
     for k, v in student_model.named_parameters():
-        # v.requires_grad = True  # train all layers TODO: uncomment this line as in master
-        # v.register_hook(lambda x: torch.nan_to_num(x))  # NaN to 0 (commented for erratic training results)
         if any(x in k for x in freeze):
             LOGGER.info(f'freezing {k}')
             v.requires_grad = False
@@ -220,6 +143,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     if RANK == -1 and batch_size == -1:  # single-GPU only, estimate best batch size
         batch_size_student = check_train_batch_size(student_model, imgsz, amp)
         loggers.on_params_update({"batch_size": batch_size_student})
+        batch_size = batch_size_student
     
     # Optimizer
     nbs = 64  # nominal batch size
@@ -295,7 +219,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                                                   gs,
                                                                   single_cls,
                                                                   hyp=hyp,
-                                                                  augment=True,
+                                                                  augment=False,
                                                                   cache=None if opt.cache == 'val' else opt.cache,
                                                                   rect=opt.rect,
                                                                   rank=LOCAL_RANK,
@@ -349,13 +273,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     teacher_model = deepcopy(student_model)
     for param in teacher_model.parameters():
         param.requires_grad = False  # Ensure teacher doesn't need gradients
-    # getting feature maps
-    feature_maps = {}
-    def get_activation(name):
-        def hook(model, input, output):
-            feature_maps[name] = output.detach()
-        return hook
-    hook_handle = de_parallel(student_model).model[0].register_forward_hook(get_activation('layer1'))
     # Start training
     t0 = time.time()
     nb = len(train_loader)  # number of batches
@@ -369,14 +286,12 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     stopper, stop = EarlyStopping(patience=opt.patience), False
     compute_loss = ComputeLoss(student_model)  # init loss class
 
-    # discriminator 
-    mse_loss = nn.MSELoss()
-
     callbacks.run('on_train_start')
     LOGGER.info(f'Image sizes {imgsz} train, {imgsz} val\n'
                 f'Using {train_loader.num_workers * WORLD_SIZE} dataloader workers\n'
                 f"Logging results to {colorstr('bold', save_dir)}\n"
                 f'Starting training for {epochs} epochs...')
+    
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         callbacks.run('on_train_epoch_start')
         student_model.train()
@@ -411,32 +326,12 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             target_imgs, _, target_paths, _ = next(target_iter)
             callbacks.run('on_train_batch_start')
             ni = i + nb * epoch  # number integrated batches (since train start)
-            imgs_student = add_random_noise(target_imgs)
-            imgs_teacher = add_random_noise(target_imgs)
-            source_imgs = add_random_noise(source_imgs) 
+            imgs_teacher = add_weak_augmentation(target_imgs)
+            imgs_student = add_strong_augmentation(imgs_teacher)
+            
             source_imgs = source_imgs.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
             imgs_teacher = imgs_teacher.to(device, non_blocking=True).float() / 255
             imgs_student = imgs_student.to(device, non_blocking=True).float() / 255
-
-            X1 = torch.cat((source_imgs, imgs_student), 0)
-            X2 = torch.cat((imgs_student, source_imgs), 0) 
-            B_total = X1.size(0)
-            B_source = source_imgs.size(0)
-            B_target = imgs_student.size(0)
-            mixed_batch = mixstyle_cross_domain(X1, X2, alpha=0.3)
-            mixed_source_imgs = mixed_batch[:B_source]      # These are the manipulated source images
-            mixed_target_imgs = mixed_batch[B_source:]      # These are the manipulated target images
-            ### hmm, đây đang là unsupervised learning, thì làm sao có mấy cái nhãn để tính loss bình thường được nhỉ
-            
-            target_imgs = torch.cat((imgs_student, mixed_target_imgs), 0)  # [original_target, mixed_target]
-            teacher_imgs = torch.cat((imgs_teacher, mixed_target_imgs), 0)  # [original_teacher, mixed_target]
-
-            # use_mixfog = np.random.rand()
-            # if use_mixfog < 0.5:
-            #     source_imgs = mixed_source_imgs
-
-            source_imgs = torch.cat((source_imgs, mixed_source_imgs), 0)  # [original_source, mixed_source]
-            source_labels = torch.cat((source_labels, source_labels), 0)  # Duplicate labels for both original and mixed
 
             # Warmup
             if ni <= nw:
@@ -462,29 +357,21 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                                              align_corners=False)
                     imgs_student = nn.functional.interpolate(imgs_student, size=ns, mode='bilinear',
                                                              align_corners=False)
-                    target_imgs = nn.functional.interpolate(target_imgs, size=ns, mode='bilinear',
-                                                            align_corners=False)
-                    teacher_imgs = nn.functional.interpolate(teacher_imgs, size=ns, mode='bilinear',
-                                                             align_corners=False)
 
             # Forward
             with torch.cuda.amp.autocast(enabled=amp):
                 #  SUPERVISED LOSS
-                student_pred = student_model(source_imgs)  # student forward
-                feat_clear = feature_maps['layer1']
- 
+                student_pred = student_model(source_imgs)  # student forward 
                 supervised_loss, supervised_loss_items = compute_loss(student_pred, source_labels.to(
                     device))  # loss scaled by batch_size
 
                 # CONSISTENCY LOSS
-                student_pred_target_main_branch = student_model(target_imgs)[0]
-                feat_foggy = feature_maps['layer1']
+                student_pred_target = student_model(imgs_student)[0]
                 with torch.no_grad():
-                    teacher_pred_target_main_branch = teacher_model(teacher_imgs)[0]
-                consistency_loss = 0
-                num_heads = len(student_pred_target_main_branch)
-                for student_tensor, teacher_tensor in zip(student_pred_target_main_branch,
-                                                          teacher_pred_target_main_branch):
+                    teacher_pred_target = teacher_model(imgs_teacher)[0]
+                consistency_loss = torch.tensor(0.0, device=device)
+                for student_tensor, teacher_tensor in zip(student_pred_target,
+                                                          teacher_pred_target):
                     # consistency_loss += torch.norm(student_tensor-teacher_tensor, p=2)
                     # consistency_loss = 1 - F.cosine_similarity(student_tensor, teacher_tensor, dim=-1).mean()
                     consistency_loss += F.smooth_l1_loss(student_tensor, teacher_tensor, reduction='mean')
@@ -492,10 +379,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     supervised_loss_items,
                     consistency_loss.detach().unsqueeze(0)
                 ])
-
-                # MIXED STYLE 
-
-
 
                 total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss
                 # unsupervised learning with target data
@@ -517,8 +400,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
                 if ema:
                     ema.update(student_model)
-                update_teacher(student_model, teacher_model, alpha)
                 last_opt_step = ni
+                update_teacher(student_model, teacher_model, alpha)
 
             # Log
             if RANK in {-1, 0}:
@@ -620,8 +503,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                         callbacks.run('on_fit_epoch_end', list(mloss) + list(results) + lr, epoch, best_fitness, fi)
 
         callbacks.run('on_train_end', last, best, epoch, results)
-    hook_handle.remove()
-
     torch.cuda.empty_cache()
     return results
 
@@ -671,7 +552,7 @@ def parse_opt(known=False):
     parser.add_argument('--local_rank', type=int, default=-1, help='Automatic DDP Multi-GPU argument, do not modify')
     parser.add_argument('--min-items', type=int, default=0, help='Experimental')
     parser.add_argument('--close-mosaic', type=int, default=0, help='Experimental')
-    parser.add_argument('--weight-consistency-loss', type=int, default=1, help='weight for consistency loss')
+    parser.add_argument('--weight-consistency-loss', type=float, default=1.0, help='weight for consistency loss')
 
     # Logger arguments
     parser.add_argument('--entity', default=None, help='Entity')
