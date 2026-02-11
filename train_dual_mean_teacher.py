@@ -356,7 +356,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             sigmoid_rampup(epoch, rampup_length)
         for i, (source_imgs, source_labels, paths,
                 _) in pbar:  # batch -------------------------------------------------------------
-            , _, target_paths, _ = next(target_iter)
+            target_imgs, _, target_paths, _ = next(target_iter)
             callbacks.run('on_train_batch_start')
             # number integrated batches (since train start)
             ni = i + nb * epoch
