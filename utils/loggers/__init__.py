@@ -64,6 +64,7 @@ class Loggers():
             'train/cls_loss',
             'train/dfl_loss',  # train loss
             'train/con_loss',
+            'train/mgd_loss',  # MGD mean teacher losses
             'metrics/precision',
             'metrics/recall',
             'metrics/mAP_0.5',
@@ -220,11 +221,18 @@ class Loggers():
 
     def on_fit_epoch_end(self, vals, epoch, best_fitness, fi):
         # Callback runs at the end of each fit (train+val) epoch
+        # Convert all values to Python floats (handles tensors and numbers)
+        vals = [float(v) if hasattr(v, 'item') else float(v) for v in vals]
         x = dict(zip(self.keys, vals))
         if self.csv:
             file = self.save_dir / 'results.csv'
-            n = len(x) + 1  # number of cols
-            s = '' if file.exists() else (('%20s,' * n % tuple(['epoch'] + self.keys)).rstrip(',') + '\n')  # add header
+            n = len(vals) + 1  # number of cols = epoch + vals
+            # Ensure header_keys has exactly len(vals) elements
+            header_keys = list(self.keys)[:len(vals)]
+            # Pad with generic names if vals > keys
+            while len(header_keys) < len(vals):
+                header_keys.append(f'col_{len(header_keys)}')
+            s = '' if file.exists() else (('%20s,' * n % tuple(['epoch'] + header_keys)).rstrip(',') + '\n')
             with open(file, 'a') as f:
                 f.write(s + ('%20.5g,' * n % tuple([epoch] + vals)).rstrip(',') + '\n')
 

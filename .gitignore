@@ -8,3 +8,5 @@
 *.txt
 *.png
 file_run/
+my_dataset/
+runs/

@@ -601,6 +601,10 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
             # Save model
             if (not nosave) or (final_epoch and not evolve):  # if save
+                # Temporarily remove hooks before saving (hooks can't be pickled)
+                student_hook.remove_hooks()
+                teacher_hook.remove_hooks()
+                
                 ckpt = {
                     'epoch': epoch,
                     'best_fitness': best_fitness,
@@ -621,6 +625,11 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 if opt.save_period > 0 and epoch % opt.save_period == 0:
                     torch.save(ckpt, w / f'epoch{epoch}.pt')
                 del ckpt
+                
+                # Re-register hooks for next epoch
+                student_hook = FeatureHookExtractor(student_model, layer_indices)
+                teacher_hook = FeatureHookExtractor(teacher_model, layer_indices)
+                
                 callbacks.run('on_model_save', last, epoch, final_epoch, best_fitness, fi)
 
         # EarlyStopping

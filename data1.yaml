@@ -1,6 +1,6 @@
-train: /content/mean_teacher_student_yolo/drive/MyDrive/mini/train/images
-val: /content/mean_teacher_student_yolo/drive/MyDrive/mini/val/images
-target_train: /content/mean_teacher_student_yolo/drive/MyDrive/mini/unsupervised/images
+train: /root/mean_teacher_student_yolo/my_dataset/mid_clear/train/images
+val: /root/mean_teacher_student_yolo/my_dataset/mid_foggy_cityscapes/val/images
+target_train: /root/mean_teacher_student_yolo/my_dataset/mid_foggy_cityscapes/train/images
 nc: 2
 names:
   0 : person
