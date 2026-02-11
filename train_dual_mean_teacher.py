@@ -378,8 +378,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             target_imgs_mixed = mixed_output[B:]
 
             # keep adding noises (on top of mixstyle-augmented target)
-            teacher_imgs = add_weak_augmentation(teacher_imgs)
-            student_imgs = add_strong_augmentation(target_imgs_mixed)
+            teacher_imgs = add_weak_augmentation(teacher_imgs).to(device, non_blocking=True)
+            student_imgs = add_strong_augmentation(target_imgs_mixed).to(device, non_blocking=True)
 
             # Warmup
             if ni <= nw:

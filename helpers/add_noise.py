@@ -44,10 +44,14 @@ to_tensor = ToTensorV2()
 def add_weak_augmentation(batch_imgs: torch.Tensor) -> torch.Tensor:
     """
     Applies WEAK (Geometric) augmentation.
-    Input: [B, 3, H, W] (0-255)
-    Output: [B, 3, H, W] (0-255, float32)
+    Input: [B, 3, H, W] float32 in [0,1] or [0,255], or uint8 [0,255]
+    Output: [B, 3, H, W] float32 in same range as input
     """
     imgs = batch_imgs.detach().cpu()
+    # Detect if input is float [0,1] and scale to [0,255] for albumentations
+    is_normalized = imgs.is_floating_point() and imgs.max() <= 1.0
+    if is_normalized:
+        imgs = (imgs * 255).clamp(0, 255)
     if imgs.dtype != torch.uint8:
         imgs = imgs.to(torch.uint8)
 
@@ -64,7 +68,10 @@ def add_weak_augmentation(batch_imgs: torch.Tensor) -> torch.Tensor:
         # Convert to Tensor
         out_tensors.append(to_tensor(image=augmented)['image'])
 
-    return torch.stack(out_tensors, dim=0).float()
+    result = torch.stack(out_tensors, dim=0).float()
+    if is_normalized:
+        result = result / 255.0
+    return result
 
 
 def add_strong_augmentation(teacher_batch_imgs: torch.Tensor) -> torch.Tensor:
@@ -74,9 +81,15 @@ def add_strong_augmentation(teacher_batch_imgs: torch.Tensor) -> torch.Tensor:
     CRITICAL NOTE: This function expects the input to ALREADY be the 
     geometrically transformed image (the output of augment_teacher_img).
     This ensures the Student and Teacher are looking at the same 'Crop/Flip'.
+    Input: [B, 3, H, W] float32 in [0,1] or [0,255], or uint8 [0,255]
+    Output: [B, 3, H, W] float32 in same range as input
     """
     imgs = teacher_batch_imgs.detach().cpu()
 
+    # Detect if input is float [0,1] and scale to [0,255] for albumentations
+    is_normalized = imgs.is_floating_point() and imgs.max() <= 1.0
+    if is_normalized:
+        imgs = (imgs * 255).clamp(0, 255)
     # Albumentations ColorJitter works best with uint8 0-255
     if imgs.dtype != torch.uint8:
         imgs = imgs.to(torch.uint8)
@@ -91,4 +104,7 @@ def add_strong_augmentation(teacher_batch_imgs: torch.Tensor) -> torch.Tensor:
         # Convert to Tensor
         out_tensors.append(to_tensor(image=augmented)['image'])
 
-    return torch.stack(out_tensors, dim=0).float()
+    result = torch.stack(out_tensors, dim=0).float()
+    if is_normalized:
+        result = result / 255.0
+    return result
