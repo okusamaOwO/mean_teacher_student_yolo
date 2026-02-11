@@ -366,12 +366,12 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     device))  # loss scaled by batch_size
 
                 # CONSISTENCY LOSS
-                student_pred_target_main_branch = student_model(imgs_student)[0]
+                student_pred_target = student_model(imgs_student)[0]
                 with torch.no_grad():
-                    teacher_pred_target_main_branch = teacher_model(imgs_teacher)[0]
+                    teacher_pred_target = teacher_model(imgs_teacher)[0]
                 consistency_loss = torch.tensor(0.0, device=device)
-                for student_tensor, teacher_tensor in zip(student_pred_target_main_branch,
-                                                          teacher_pred_target_main_branch):
+                for student_tensor, teacher_tensor in zip(student_pred_target,
+                                                          teacher_pred_target):
                     # consistency_loss += torch.norm(student_tensor-teacher_tensor, p=2)
                     # consistency_loss = 1 - F.cosine_similarity(student_tensor, teacher_tensor, dim=-1).mean()
                     consistency_loss += F.smooth_l1_loss(student_tensor, teacher_tensor, reduction='mean')
@@ -401,7 +401,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 if ema:
                     ema.update(student_model)
                 last_opt_step = ni
-            update_teacher(student_model, teacher_model, alpha)
+                update_teacher(student_model, teacher_model, alpha)
 
             # Log
             if RANK in {-1, 0}:
