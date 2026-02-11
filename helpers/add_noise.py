@@ -44,12 +44,13 @@ to_tensor = ToTensorV2()
 def add_weak_augmentation(batch_imgs: torch.Tensor) -> torch.Tensor:
     """
     Applies WEAK (Geometric) augmentation.
-    Input: [B, 3, H, W] (0-255)
+    Input: [B, 3, H, W] (0-255, uint8 or float)
     Output: [B, 3, H, W] (0-255, float32)
     """
     imgs = batch_imgs.detach().cpu()
     if imgs.dtype != torch.uint8:
-        imgs = imgs.to(torch.uint8)
+        # Clamp values to valid range before conversion to prevent overflow
+        imgs = imgs.clamp(0, 255).to(torch.uint8)
 
     out_tensors = []
 
@@ -74,12 +75,16 @@ def add_strong_augmentation(teacher_batch_imgs: torch.Tensor) -> torch.Tensor:
     CRITICAL NOTE: This function expects the input to ALREADY be the 
     geometrically transformed image (the output of augment_teacher_img).
     This ensures the Student and Teacher are looking at the same 'Crop/Flip'.
+    
+    Input: [B, 3, H, W] (0-255, float from add_weak_augmentation)
+    Output: [B, 3, H, W] (0-255, float32)
     """
     imgs = teacher_batch_imgs.detach().cpu()
 
     # Albumentations ColorJitter works best with uint8 0-255
     if imgs.dtype != torch.uint8:
-        imgs = imgs.to(torch.uint8)
+        # Clamp values to valid range before conversion to prevent overflow
+        imgs = imgs.clamp(0, 255).to(torch.uint8)
 
     out_tensors = []
     for img in imgs:
