@@ -3,6 +3,20 @@ import torch
 
 
 def mixstyle_for_teacher(target_imgs: torch.Tensor, source_imgs: torch.Tensor, p: float = 1, alpha: float = 1) -> torch.Tensor:
+    """
+    Apply MixStyle to transfer source style to target images.
+
+    NOTE: Expects normalized float tensors in [0, 1] range.
+
+    Args:
+        target_imgs: Target domain images (content) [B, C, H, W], normalized to [0, 1]
+        source_imgs: Source domain images (style) [B, C, H, W], normalized to [0, 1]
+        p: Probability of applying mixstyle
+        alpha: Mixing ratio (0 = target style, 1 = source style)
+
+    Returns:
+        source_styles_target_imgs: Images with target content but source-influenced style, in [0, 1]
+    """
     if torch.rand(1).item() > p:
         return target_imgs
 

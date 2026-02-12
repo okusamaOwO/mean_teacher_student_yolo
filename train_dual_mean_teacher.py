@@ -361,19 +361,17 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             # number integrated batches (since train start)
             ni = i + nb * epoch
 
-            # Student receives the original target images (or could add weak augmentation)
-            imgs_student = target_imgs
-            
-            # Apply MixStyle to target images for teacher (transfer source style)
-            imgs_teacher = mixstyle_for_teacher(
-                target_imgs, source_imgs, p=1.0, alpha=0.1)
-            # uint8 to float32, 0-255 to 0.0-1.0
+            # Normalize images first: uint8 to float32, 0-255 to 0.0-1.0
             source_imgs = source_imgs.to(
                 device, non_blocking=True).float() / 255
-            imgs_teacher = imgs_teacher.to(
+            target_imgs = target_imgs.to(
                 device, non_blocking=True).float() / 255
-            imgs_student = imgs_student.to(
-                device, non_blocking=True).float() / 255
+
+            # Apply MixStyle to normalized target images for teacher (transfer source style)
+            imgs_teacher = mixstyle_for_teacher(
+                target_imgs, source_imgs, p=1.0, alpha=0.99)
+            # Student receives the original normalized target images
+            imgs_student = target_imgs
 
             # Warmup
             if ni <= nw:
