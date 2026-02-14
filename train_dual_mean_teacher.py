@@ -373,8 +373,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             # Apply mixstyle augmentation
             B = source_imgs.size(0)
             mixed_output = apply_mixstyle_custom(
-                source_imgs, target_imgs, p=0.5, alpha=0.1)
-            source_imgs = mixed_output[0:B]
+                source_imgs, target_imgs, p=1, alpha=5, beta=1.2)
+            source_imgs = mixed_output[0:B] 
             student_imgs = mixed_output[B:]
 
             # Warmup
