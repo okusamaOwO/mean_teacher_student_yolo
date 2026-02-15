@@ -307,7 +307,19 @@ def main():
         label_b='Target (original)',
         layer_indices=layer_indices,
         title='Baseline - Source(orig) vs Target(orig)',
+        save_dir=args.save_dir)   
+     
+    # ---- Plot 4: 
+    # same images but with different aug 
+    print("\n[3/3] Source (original) vs Source (mixed) — different styles, expect SEPARATION")
+    plot_tsne_pair(
+        result['source_orig'], result['source_mixed'],
+        label_a='Source (original)',
+        label_b='Source (mixed)',
+        layer_indices=layer_indices,
+        title='Baseline - Source(orig) vs Source(mixed)',
         save_dir=args.save_dir)
+
 
     print("\nDone! All plots saved to:", args.save_dir)
 

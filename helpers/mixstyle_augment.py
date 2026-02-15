@@ -46,11 +46,10 @@ def apply_mixstyle_custom(source_imgs, target_imgs, p=0.5, alpha=0.1, beta = 0.1
     # Standard MixStyle samples element-wise (N, C, 1, 1) or batch-wise (N, 1, 1, 1).
     N = X.size(0)
     beta_dist = torch.distributions.Beta(alpha, beta)
-    # lmda = beta_dist.sample((N, 1, 1, 1)).to(X.device)
+    lmda = beta_dist.sample((N, 1, 1, 1)).to(X.device)
     # print("-" * 150)
     # print("LAMBDA", lmda)
     # print("-" * 150)
-    lmda = torch.tensor(1.0).to(X.device)  # For testing, set lambda to 0 (full permuted style)
 
     # Mix the statistics
     # This creates the "Source-like Target" and "Target-like Source" stats
