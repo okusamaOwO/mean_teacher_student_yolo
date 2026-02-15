@@ -5,8 +5,9 @@ This script:
 1. Loads a trained model (or initializes one from config)
 2. Loads source (labeled) and target (unlabeled) images
 3. Extracts feature maps from early backbone layers (layers 0, 1, 2) using hooks
-4. Runs before/after MixStyle comparison
-5. Visualizes using t-SNE to show that styles are exchanged
+4. Visualizes:
+   - Source (original) vs Target (after MixStyle) — both should carry source style, expecting overlap
+   - Source (after MixStyle) vs Target (original) — both should carry target style, expecting overlap
 
 Usage:
     python visualize_tsne_features.py --weights yolov9-t-converted.pt --data data1.yaml --cfg models/detect/gelan-t.yaml --imgsz 640 --batch-size 8 --num-batches 10 --layers 0 1 2
@@ -74,22 +75,37 @@ def register_hooks(model, layer_indices):
     return hooks, handles
 
 
-def collect_features(model, source_loader, target_loader, device, layer_indices,
-                     num_batches=10, apply_mix=False, mix_alpha=1.3, mix_beta=6):
+def collect_features_cross_style(model, source_loader, target_loader, device, layer_indices,
+                                 num_batches=10, mix_alpha=1.3, mix_beta=6):
     """
-    Run source and target images through the model, collect early-layer features.
+    Collect features for cross-style comparison:
+      - source_original: source images WITHOUT MixStyle (original source style)
+      - target_after_mix: target images AFTER MixStyle (should now carry source style)
+      - source_after_mix: source images AFTER MixStyle (should now carry target style)
+      - target_original: target images WITHOUT MixStyle (original target style)
 
     Returns:
-        features_per_layer: dict {layer_idx: (N, 2*C) numpy array}
-        labels: (N,) numpy array — 0=source, 1=target
+        features dict with keys: 'source_orig', 'target_mixed', 'source_mixed', 'target_orig'
+        Each is a dict {layer_idx: (N, 2*C) numpy array}
     """
     model.eval()
     hooks, handles = register_hooks(model, layer_indices)
 
-    all_features = {idx: [] for idx in layer_indices}
-    all_labels = []
+    result = {
+        'source_orig':   {idx: [] for idx in layer_indices},
+        'target_mixed':  {idx: [] for idx in layer_indices},
+        'source_mixed':  {idx: [] for idx in layer_indices},
+        'target_orig':   {idx: [] for idx in layer_indices},
+    }
 
     target_iter = iter(cycle(target_loader))
+
+    def forward_and_collect(imgs, key):
+        _ = model(imgs)
+        for idx in layer_indices:
+            feat = hooks[idx].get_pooled()
+            if feat is not None:
+                result[key][idx].append(feat)
 
     with torch.no_grad():
         for batch_i, (source_imgs, _, _, _) in enumerate(source_loader):
@@ -105,81 +121,77 @@ def collect_features(model, source_loader, target_loader, device, layer_indices,
 
             B = source_imgs.size(0)
 
-            if apply_mix:
-                mixed_output = apply_mixstyle_custom(
-                    source_imgs, target_imgs, p=1, alpha=mix_alpha, beta=mix_beta)
-                source_imgs_feed = mixed_output[0:B]
-                target_imgs_feed = mixed_output[B:]
-            else:
-                source_imgs_feed = source_imgs
-                target_imgs_feed = target_imgs
+            # 1) Original source features
+            forward_and_collect(source_imgs, 'source_orig')
 
-            # Forward source images
-            _ = model(source_imgs_feed)
-            for idx in layer_indices:
-                feat = hooks[idx].get_pooled()  # (B, 2*C)
-                if feat is not None:
-                    all_features[idx].append(feat)
-            all_labels.append(np.zeros(B))  # 0 = source
+            # 2) Original target features
+            forward_and_collect(target_imgs, 'target_orig')
 
-            # Forward target images
-            _ = model(target_imgs_feed)
-            for idx in layer_indices:
-                feat = hooks[idx].get_pooled()  # (B, 2*C)
-                if feat is not None:
-                    all_features[idx].append(feat)
-            all_labels.append(np.ones(target_imgs_feed.size(0)))  # 1 = target
+            # 3) Apply MixStyle
+            mixed_output = apply_mixstyle_custom(
+                source_imgs, target_imgs, p=1, alpha=mix_alpha, beta=mix_beta)
+            source_mixed = mixed_output[0:B]    # source content + target style
+            # target content + source style
+            target_mixed = mixed_output[B:]
 
-    # Cleanup hooks
+            # 4) Source after MixStyle (carries target style)
+            forward_and_collect(source_mixed, 'source_mixed')
+
+            # 5) Target after MixStyle (carries source style)
+            forward_and_collect(target_mixed, 'target_mixed')
+
     for h in handles:
         h.remove()
 
     # Concatenate
-    labels = np.concatenate(all_labels, axis=0)
-    features_per_layer = {}
-    for idx in layer_indices:
-        features_per_layer[idx] = np.concatenate(all_features[idx], axis=0)
+    for key in result:
+        for idx in layer_indices:
+            result[key][idx] = np.concatenate(result[key][idx], axis=0)
 
-    return features_per_layer, labels
+    return result
 
 
-def plot_tsne(features_per_layer, labels, title_prefix, save_dir):
-    """Run t-SNE on features from each layer and plot."""
+def plot_tsne_pair(features_a, features_b, label_a, label_b, layer_indices, title, save_dir):
+    """Run t-SNE on combined features from two groups and plot per layer."""
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    n_layers = len(features_per_layer)
+    n_layers = len(layer_indices)
     fig, axes = plt.subplots(1, n_layers, figsize=(7 * n_layers, 6))
     if n_layers == 1:
         axes = [axes]
 
-    for ax, (layer_idx, features) in zip(axes, sorted(features_per_layer.items())):
-        print(f"  Running t-SNE for layer {layer_idx} with {features.shape[0]} samples, "
-              f"feature dim={features.shape[1]}...")
+    for ax, layer_idx in zip(axes, sorted(layer_indices)):
+        fa = np.nan_to_num(features_a[layer_idx],
+                           nan=0.0, posinf=0.0, neginf=0.0)
+        fb = np.nan_to_num(features_b[layer_idx],
+                           nan=0.0, posinf=0.0, neginf=0.0)
+        combined = np.concatenate([fa, fb], axis=0)
+        labels = np.array([0] * fa.shape[0] + [1] * fb.shape[0])
 
-        # Handle NaN/Inf
-        features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+        print(f"  Running t-SNE for layer {layer_idx} with {combined.shape[0]} samples, "
+              f"feature dim={combined.shape[1]}...")
 
-        perplexity = min(30, features.shape[0] - 1)
+        perplexity = min(30, combined.shape[0] - 1)
         tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42,
                     n_iter=1000, learning_rate='auto', init='pca')
-        embeddings = tsne.fit_transform(features)
+        emb = tsne.fit_transform(combined)
 
-        source_mask = labels == 0
-        target_mask = labels == 1
+        mask_a = labels == 0
+        mask_b = labels == 1
 
-        ax.scatter(embeddings[source_mask, 0], embeddings[source_mask, 1],
-                   c='blue', alpha=0.6, s=20, label='Source', edgecolors='none')
-        ax.scatter(embeddings[target_mask, 0], embeddings[target_mask, 1],
-                   c='red', alpha=0.6, s=20, label='Target', edgecolors='none')
+        ax.scatter(emb[mask_a, 0], emb[mask_a, 1],
+                   c='blue', alpha=0.6, s=20, label=label_a, edgecolors='none')
+        ax.scatter(emb[mask_b, 0], emb[mask_b, 1],
+                   c='red', alpha=0.6, s=20, label=label_b, edgecolors='none')
         ax.set_title(f'Layer {layer_idx}', fontsize=14)
         ax.legend(fontsize=11)
         ax.set_xticks([])
         ax.set_yticks([])
 
-    fig.suptitle(title_prefix, fontsize=16, fontweight='bold')
+    fig.suptitle(title, fontsize=16, fontweight='bold')
     plt.tight_layout()
-    save_path = save_dir / f"{title_prefix.replace(' ', '_').lower()}.png"
+    save_path = save_dir / f"{title.replace(' ', '_').lower()}.png"
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"  Saved: {save_path}")
@@ -257,67 +269,47 @@ def main():
     print(
         f"Collecting {args.num_batches} batches x {args.batch_size} images each...")
 
-    # ---- BEFORE MixStyle ----
-    print("\n[1/2] Collecting features BEFORE MixStyle...")
-    features_before, labels_before = collect_features(
-        model, source_loader, target_loader, device, layer_indices,
-        num_batches=args.num_batches, apply_mix=False)
-
-    print("Plotting t-SNE (before)...")
-    plot_tsne(features_before, labels_before,
-              "Before MixStyle", args.save_dir)
-
-    # ---- AFTER MixStyle ----
+    # ---- Collect all features ----
     print(
-        f"\n[2/2] Collecting features AFTER MixStyle (alpha={args.mix_alpha}, beta={args.mix_beta})...")
-    features_after, labels_after = collect_features(
+        f"\nCollecting features (alpha={args.mix_alpha}, beta={args.mix_beta})...")
+    result = collect_features_cross_style(
         model, source_loader, target_loader, device, layer_indices,
-        num_batches=args.num_batches, apply_mix=True,
-        mix_alpha=args.mix_alpha, mix_beta=args.mix_beta)
+        num_batches=args.num_batches, mix_alpha=args.mix_alpha, mix_beta=args.mix_beta)
 
-    print("Plotting t-SNE (after)...")
-    plot_tsne(features_after, labels_after,
-              "After MixStyle", args.save_dir)
+    # ---- Plot 1: Source(original) vs Target(after MixStyle) ----
+    # Both should carry SOURCE style => expect overlap
+    print("\n[1/3] Source (original) vs Target (after MixStyle) — both carry source style, expect OVERLAP")
+    plot_tsne_pair(
+        result['source_orig'], result['target_mixed'],
+        label_a='Source (original)',
+        label_b='Target (after MixStyle)',
+        layer_indices=layer_indices,
+        title='Source Style - Source(orig) vs Target(mixed)',
+        save_dir=args.save_dir)
 
-    # ---- COMBINED side-by-side plot ----
-    print("\nCreating combined comparison plot...")
-    n_layers = len(layer_indices)
-    fig, axes = plt.subplots(2, n_layers, figsize=(7 * n_layers, 12))
-    if n_layers == 1:
-        axes = axes.reshape(2, 1)
+    # ---- Plot 2: Target(original) vs Source(after MixStyle) ----
+    # Both should carry TARGET style => expect overlap
+    print("\n[2/3] Target (original) vs Source (after MixStyle) — both carry target style, expect OVERLAP")
+    plot_tsne_pair(
+        result['target_orig'], result['source_mixed'],
+        label_a='Target (original)',
+        label_b='Source (after MixStyle)',
+        layer_indices=layer_indices,
+        title='Target Style - Target(orig) vs Source(mixed)',
+        save_dir=args.save_dir)
 
-    for col, layer_idx in enumerate(sorted(layer_indices)):
-        for row, (features, labels, condition) in enumerate([
-            (features_before, labels_before, "Before MixStyle"),
-            (features_after, labels_after, "After MixStyle"),
-        ]):
-            feat = np.nan_to_num(
-                features[layer_idx], nan=0.0, posinf=0.0, neginf=0.0)
-            perplexity = min(30, feat.shape[0] - 1)
-            tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42,
-                        n_iter=1000, learning_rate='auto', init='pca')
-            emb = tsne.fit_transform(feat)
+    # ---- Plot 3: Baseline - Source(original) vs Target(original) ----
+    # Different styles => expect SEPARATION
+    print("\n[3/3] Source (original) vs Target (original) — different styles, expect SEPARATION")
+    plot_tsne_pair(
+        result['source_orig'], result['target_orig'],
+        label_a='Source (original)',
+        label_b='Target (original)',
+        layer_indices=layer_indices,
+        title='Baseline - Source(orig) vs Target(orig)',
+        save_dir=args.save_dir)
 
-            ax = axes[row, col]
-            src = labels == 0
-            tgt = labels == 1
-            ax.scatter(emb[src, 0], emb[src, 1], c='blue', alpha=0.6, s=20,
-                       label='Source', edgecolors='none')
-            ax.scatter(emb[tgt, 0], emb[tgt, 1], c='red', alpha=0.6, s=20,
-                       label='Target', edgecolors='none')
-            ax.set_title(f'{condition} — Layer {layer_idx}', fontsize=13)
-            ax.legend(fontsize=10)
-            ax.set_xticks([])
-            ax.set_yticks([])
-
-    fig.suptitle(f'Style Feature t-SNE: MixStyle(alpha={args.mix_alpha}, beta={args.mix_beta})',
-                 fontsize=16, fontweight='bold')
-    plt.tight_layout()
-    save_path = Path(args.save_dir) / 'comparison_before_after_mixstyle.png'
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"Saved comparison: {save_path}")
-    print("\nDone!")
+    print("\nDone! All plots saved to:", args.save_dir)
 
 
 if __name__ == '__main__':
