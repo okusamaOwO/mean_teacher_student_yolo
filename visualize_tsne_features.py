@@ -244,12 +244,12 @@ def main():
     print("Creating dataloaders...")
     source_loader, _ = create_dataloader(
         train_path, imgsz, args.batch_size, gs,
-        hyp=hyp, augment=False, cache=False, rect=False,
+        hyp=hyp, augment=True, cache=False, rect=False,
         rank=-1, workers=4, prefix=colorstr('source: '), shuffle=True)
 
     target_loader, _ = create_dataloader(
         target_path, imgsz, args.batch_size, gs,
-        hyp=hyp, augment=False, cache=False, rect=False,
+        hyp=hyp, augment=True, cache=False, rect=False,
         rank=-1, workers=4, prefix=colorstr('target: '), shuffle=True)
 
     layer_indices = args.layers
