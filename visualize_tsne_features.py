@@ -197,6 +197,70 @@ def plot_tsne_pair(features_a, features_b, label_a, label_b, layer_indices, titl
     print(f"  Saved: {save_path}")
 
 
+def plot_tsne_four_domains(source_orig, target_orig, source_mixed, target_mixed,
+                           layer_indices, title, save_dir):
+    """Run t-SNE on all 4 style domains combined and plot per layer.
+
+    Domains:
+        1. Source (original)          - blue
+        2. Target (original)          - red
+        3. Source after MixStyle      - cyan   (target-like source)
+        4. Target after MixStyle      - orange (source-like target)
+    """
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    n_layers = len(layer_indices)
+    fig, axes = plt.subplots(1, n_layers, figsize=(7 * n_layers, 6))
+    if n_layers == 1:
+        axes = [axes]
+
+    domain_cfg = [
+        ('source_orig',  source_orig,  'Source (original)',        '#2176FF', 'o'),
+        ('target_orig',  target_orig,  'Target (original)',        '#E8333F', 's'),
+        ('source_mixed', source_mixed, 'Source after MixStyle',    '#00CFC1', '^'),
+        ('target_mixed', target_mixed, 'Target after MixStyle',    '#FF8C00', 'D'),
+    ]
+
+    for ax, layer_idx in zip(axes, sorted(layer_indices)):
+        arrays = []
+        labels = []
+        for i, (key, feat_dict, label, color, marker) in enumerate(domain_cfg):
+            f = np.nan_to_num(feat_dict[layer_idx],
+                              nan=0.0, posinf=0.0, neginf=0.0)
+            arrays.append(f)
+            labels.extend([i] * f.shape[0])
+
+        combined = np.concatenate(arrays, axis=0)
+        labels = np.array(labels)
+
+        print(f"  Running t-SNE (4 domains) for layer {layer_idx} with "
+              f"{combined.shape[0]} samples, feature dim={combined.shape[1]}...")
+
+        perplexity = min(30, combined.shape[0] - 1)
+        tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42,
+                    n_iter=1000, learning_rate='auto', init='pca')
+        emb = tsne.fit_transform(combined)
+
+        for i, (key, _, label, color, marker) in enumerate(domain_cfg):
+            mask = labels == i
+            ax.scatter(emb[mask, 0], emb[mask, 1],
+                       c=color, alpha=0.6, s=25, label=label,
+                       marker=marker, edgecolors='none')
+
+        ax.set_title(f'Layer {layer_idx}', fontsize=14)
+        ax.legend(fontsize=9, loc='best', markerscale=1.2)
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    fig.suptitle(title, fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    save_path = save_dir / f"{title.replace(' ', '_').lower()}.png"
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {save_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='t-SNE visualization of early-layer features')
@@ -307,19 +371,28 @@ def main():
         label_b='Target (original)',
         layer_indices=layer_indices,
         title='Baseline - Source(orig) vs Target(orig)',
-        save_dir=args.save_dir)   
-     
-    # ---- Plot 4: 
-    # same images but with different aug 
-    print("\n[3/3] Source (original) vs Source (mixed) — different styles, expect SEPARATION")
+        save_dir=args.save_dir)
+
+    # ---- Plot 4: Source(orig) vs Source(mixed) ----
+    print("\n[4/5] Source (original) vs Source (mixed) — different styles, expect SEPARATION")
     plot_tsne_pair(
         result['source_orig'], result['source_mixed'],
         label_a='Source (original)',
         label_b='Source (mixed)',
         layer_indices=layer_indices,
-        title='Baseline - Source(orig) vs Source(mixed)',
+        title='Source(orig) vs Source(mixed)',
         save_dir=args.save_dir)
 
+    # ---- Plot 5: All 4 style domains in one figure ----
+    print("\n[5/5] All 4 style domains — Source, Target, Source(mixed), Target(mixed)")
+    plot_tsne_four_domains(
+        source_orig=result['source_orig'],
+        target_orig=result['target_orig'],
+        source_mixed=result['source_mixed'],
+        target_mixed=result['target_mixed'],
+        layer_indices=layer_indices,
+        title='All 4 Style Domains',
+        save_dir=args.save_dir)
 
     print("\nDone! All plots saved to:", args.save_dir)
 
