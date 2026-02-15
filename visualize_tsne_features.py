@@ -232,16 +232,24 @@ def main():
     gs = max(int(model.stride.max()), 32)
     imgsz = check_img_size(args.imgsz, gs, floor=gs * 2)
 
+    # Minimal hyp dict needed by the dataloader (no augmentation)
+    hyp = {
+        'mosaic': 0.0, 'mixup': 0.0, 'copy_paste': 0.0,
+        'degrees': 0.0, 'translate': 0.0, 'scale': 0.0, 'shear': 0.0,
+        'perspective': 0.0, 'flipud': 0.0, 'fliplr': 0.0,
+        'hsv_h': 0.0, 'hsv_s': 0.0, 'hsv_v': 0.0,
+    }
+
     # Create dataloaders
     print("Creating dataloaders...")
     source_loader, _ = create_dataloader(
         train_path, imgsz, args.batch_size, gs,
-        hyp=None, augment=True, cache=False, rect=False,
+        hyp=hyp, augment=False, cache=False, rect=False,
         rank=-1, workers=4, prefix=colorstr('source: '), shuffle=True)
 
     target_loader, _ = create_dataloader(
         target_path, imgsz, args.batch_size, gs,
-        hyp=None, augment=True, cache=False, rect=False,
+        hyp=hyp, augment=False, cache=False, rect=False,
         rank=-1, workers=4, prefix=colorstr('target: '), shuffle=True)
 
     layer_indices = args.layers
