@@ -120,8 +120,10 @@ def collect_features_fda(model, source_loader, target_loader, device, layer_indi
 
             target_imgs, _, _, _ = next(target_iter)
 
-            source_imgs = source_imgs.to(device, non_blocking=True).float() / 255
-            target_imgs = target_imgs.to(device, non_blocking=True).float() / 255
+            source_imgs = source_imgs.to(
+                device, non_blocking=True).float() / 255
+            target_imgs = target_imgs.to(
+                device, non_blocking=True).float() / 255
 
             # 1) Original source features
             forward_and_collect(source_imgs, 'source_orig')
@@ -180,7 +182,8 @@ def save_sample_images(source_imgs, target_imgs, source_fda, target_fda, save_di
                 axes[row, col].set_ylabel(label, fontsize=12, rotation=0,
                                           labelpad=120, va='center')
 
-    fig.suptitle(f'FDA Sample Images (batch {batch_idx})', fontsize=16, fontweight='bold')
+    fig.suptitle(
+        f'FDA Sample Images (batch {batch_idx})', fontsize=16, fontweight='bold')
     plt.tight_layout()
     save_path = save_dir / f'fda_sample_images_batch{batch_idx}.png'
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -328,13 +331,15 @@ def plot_fda_amplitude_comparison(source_imgs, target_imgs, source_fda, target_f
         fft_shift = torch.fft.fftshift(fft)
         log_amp = torch.log1p(torch.abs(fft_shift)).cpu().numpy()
         axes[1, col].imshow(log_amp, cmap='inferno')
-        axes[1, col].set_title(f'{label}\n(Log Amplitude Spectrum)', fontsize=10)
+        axes[1, col].set_title(
+            f'{label}\n(Log Amplitude Spectrum)', fontsize=10)
         axes[1, col].axis('off')
 
     axes[0, 0].set_ylabel('Spatial', fontsize=12)
     axes[1, 0].set_ylabel('Frequency', fontsize=12)
 
-    fig.suptitle('FDA Amplitude Spectrum Comparison', fontsize=16, fontweight='bold')
+    fig.suptitle('FDA Amplitude Spectrum Comparison',
+                 fontsize=16, fontweight='bold')
     plt.tight_layout()
     save_path = save_dir / f'fda_amplitude_comparison_batch{batch_idx}.png'
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -413,7 +418,8 @@ def main():
     layer_indices = args.layers
     print(f"Will hook layers: {layer_indices}")
     print(f"FDA beta (low-freq window): {args.fda_beta}")
-    print(f"Collecting {args.num_batches} batches x {args.batch_size} images each...")
+    print(
+        f"Collecting {args.num_batches} batches x {args.batch_size} images each...")
 
     # ---- Optionally save sample images showing FDA effect ----
     if args.save_samples:
@@ -424,8 +430,10 @@ def main():
                 if batch_i >= 2:  # save 2 batches of samples
                     break
                 target_imgs, _, _, _ = next(target_iter)
-                source_imgs = source_imgs.to(device, non_blocking=True).float() / 255
-                target_imgs = target_imgs.to(device, non_blocking=True).float() / 255
+                source_imgs = source_imgs.to(
+                    device, non_blocking=True).float() / 255
+                target_imgs = target_imgs.to(
+                    device, non_blocking=True).float() / 255
 
                 source_fda, target_fda = fda_source_to_target(
                     source_imgs, target_imgs, beta=args.fda_beta)

@@ -118,7 +118,8 @@ def apply_fda(source_imgs, target_imgs, p=0.5, beta=0.01):
     if np.random.random() > p:
         return torch.cat([source_imgs, target_imgs], dim=0)
 
-    src_styled, trg_styled = fda_source_to_target(source_imgs, target_imgs, beta=beta)
+    src_styled, trg_styled = fda_source_to_target(
+        source_imgs, target_imgs, beta=beta)
     return torch.cat([src_styled, trg_styled], dim=0)
 
 
@@ -129,10 +130,14 @@ if __name__ == "__main__":
     target = torch.rand(B, C, H, W)
 
     src_styled, trg_styled = fda_source_to_target(source, target, beta=0.05)
-    print(f"source_in_target_style shape: {src_styled.shape}")  # (4, 3, 64, 64)
-    print(f"target_in_source_style shape: {trg_styled.shape}")  # (4, 3, 64, 64)
-    print(f"Value range src_styled: [{src_styled.min():.3f}, {src_styled.max():.3f}]")
-    print(f"Value range trg_styled: [{trg_styled.min():.3f}, {trg_styled.max():.3f}]")
+    # (4, 3, 64, 64)
+    print(f"source_in_target_style shape: {src_styled.shape}")
+    # (4, 3, 64, 64)
+    print(f"target_in_source_style shape: {trg_styled.shape}")
+    print(
+        f"Value range src_styled: [{src_styled.min():.3f}, {src_styled.max():.3f}]")
+    print(
+        f"Value range trg_styled: [{trg_styled.min():.3f}, {trg_styled.max():.3f}]")
 
     combined = apply_fda(source, target, p=1.0, beta=0.05)
     print(f"Combined output shape: {combined.shape}")  # (8, 3, 64, 64)
