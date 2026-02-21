@@ -573,7 +573,7 @@ def parse_opt(known=False):
     parser.add_argument('--close-mosaic', type=int, default=0, help='Experimental')
     parser.add_argument('--weight-consistency-loss', type=float, default=1.0, help='weight for consistency loss')
     parser.add_argument('--fda-beta', type=float, default=0.01, help='FDA beta: size of low-freq window to swap (0.01-0.09)')
-    parser.add_argument('--tsne-interval', type=int, default=5, help='Generate t-SNE plot every N epochs (0 to disable)')
+    parser.add_argument('--tsne-interval', type=int, default=1, help='Generate t-SNE plot every N epochs (0 to disable)')
 
     # Logger arguments
     parser.add_argument('--entity', default=None, help='Entity')
