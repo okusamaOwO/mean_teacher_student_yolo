@@ -427,7 +427,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         # t-SNE visualization (every tsne_interval epochs)
         if RANK in {-1, 0} and (epoch % opt.tsne_interval == 0 or epoch == epochs - 1):
             LOGGER.info(f'Generating t-SNE visualization for epoch {epoch}...')
-            tsne_layer_indices = list(range(min(5, len(student_model.model))))  # first 5 layers
+            tsne_layer_indices = list(range(min(9, len(student_model.model))))  # first 5 layers
             tsne_path = visualize_tsne(
                 student_model, last_adapted_source, last_target_imgs,
                 layer_indices=tsne_layer_indices,
