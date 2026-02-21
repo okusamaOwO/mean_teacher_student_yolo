@@ -108,7 +108,7 @@ def visualize_tsne(student_model, adapted_source_imgs, target_imgs, layer_indice
         effective_perplexity = min(perplexity, max(5, n_total // 2 - 1))
 
         tsne = TSNE(n_components=2, perplexity=effective_perplexity,
-                    n_iter=n_iter, random_state=42)
+                    n_iter=n_iter, random_state=42, init='pca')
         embedded = tsne.fit_transform(combined)
 
         # Plot
