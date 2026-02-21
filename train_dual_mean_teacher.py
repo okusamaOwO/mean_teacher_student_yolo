@@ -23,6 +23,7 @@ from helpers.add_noise import add_weak_augmentation, add_strong_augmentation
 from helpers.update_teacher import update_teacher
 from helpers.sigmoid_rampup import sigmoid_rampup
 from helpers.apply_fourier import fourier_domain_adaptation
+from helpers.visualize_tsne import visualize_tsne
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLO root directory
@@ -337,6 +338,10 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             # Fourier Domain Adaptation: transfer target style to source images
             source_imgs = fourier_domain_adaptation(source_imgs, imgs_teacher, beta=opt.fda_beta)
 
+            # Save last batch tensors for t-SNE visualization at end of epoch
+            last_adapted_source = source_imgs.detach()
+            last_target_imgs = imgs_teacher.detach()
+
             # Warmup
             if ni <= nw:
                 xi = [0, nw]  # x interp
@@ -418,6 +423,16 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 if callbacks.stop_training:
                     return
             # end batch ------------------------------------------------------------------------------------------------
+
+        # t-SNE visualization (every tsne_interval epochs)
+        if RANK in {-1, 0} and (epoch % opt.tsne_interval == 0 or epoch == epochs - 1):
+            LOGGER.info(f'Generating t-SNE visualization for epoch {epoch}...')
+            tsne_layer_indices = list(range(min(5, len(student_model.model))))  # first 5 layers
+            tsne_path = visualize_tsne(
+                student_model, last_adapted_source, last_target_imgs,
+                layer_indices=tsne_layer_indices,
+                save_dir=save_dir, epoch=epoch)
+            LOGGER.info(f't-SNE saved to {tsne_path}')
 
         # Scheduler
         lr = [x['lr'] for x in student_optimizer.param_groups]  # for loggers
@@ -558,6 +573,7 @@ def parse_opt(known=False):
     parser.add_argument('--close-mosaic', type=int, default=0, help='Experimental')
     parser.add_argument('--weight-consistency-loss', type=float, default=1.0, help='weight for consistency loss')
     parser.add_argument('--fda-beta', type=float, default=0.01, help='FDA beta: size of low-freq window to swap (0.01-0.09)')
+    parser.add_argument('--tsne-interval', type=int, default=5, help='Generate t-SNE plot every N epochs (0 to disable)')
 
     # Logger arguments
     parser.add_argument('--entity', default=None, help='Entity')
