@@ -26,6 +26,14 @@ def fourier_domain_adaptation(source_images, target_images, beta=0.01):
     Returns:
         adapted: (B, C, H, W) tensor in [0, 1], source images with target style.
     """
+    # --- align target batch size to source batch size ---
+    B_src = source_images.shape[0]
+    B_tgt = target_images.shape[0]
+    if B_tgt != B_src: # 
+        # Randomly sample (with replacement if needed) B_src indices from target
+        idx = torch.randint(0, B_tgt, (B_src, ), device=source_images.device)
+        target_images = target_images[idx]
+
     # --- forward FFT (shift zero-frequency to center) ---
     src_fft = torch.fft.fft2(source_images, dim=(-2, -1))
     src_fft = torch.fft.fftshift(src_fft, dim=(-2, -1))
