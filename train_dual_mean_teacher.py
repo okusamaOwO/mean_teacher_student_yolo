@@ -22,6 +22,7 @@ from tqdm import tqdm
 from helpers.add_noise import add_weak_augmentation, add_strong_augmentation
 from helpers.update_teacher import update_teacher
 from helpers.sigmoid_rampup import sigmoid_rampup
+from helpers.apply_fourier import fourier_domain_adaptation
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLO root directory
@@ -333,6 +334,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             imgs_teacher = imgs_teacher.to(device, non_blocking=True).float() / 255
             imgs_student = imgs_student.to(device, non_blocking=True).float() / 255
 
+            # Fourier Domain Adaptation: transfer target style to source images
+            source_imgs = fourier_domain_adaptation(source_imgs, imgs_teacher, beta=opt.fda_beta)
+
             # Warmup
             if ni <= nw:
                 xi = [0, nw]  # x interp
@@ -553,6 +557,7 @@ def parse_opt(known=False):
     parser.add_argument('--min-items', type=int, default=0, help='Experimental')
     parser.add_argument('--close-mosaic', type=int, default=0, help='Experimental')
     parser.add_argument('--weight-consistency-loss', type=float, default=1.0, help='weight for consistency loss')
+    parser.add_argument('--fda-beta', type=float, default=0.01, help='FDA beta: size of low-freq window to swap (0.01-0.09)')
 
     # Logger arguments
     parser.add_argument('--entity', default=None, help='Entity')
