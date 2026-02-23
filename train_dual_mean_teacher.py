@@ -351,7 +351,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)
         student_optimizer.zero_grad()
         target_iter = iter(cycle(unsupervised_loader))
-        rampup_length = 20
+        rampup_length = 10
         weight_for_consistency_loss = opt.weight_consistency_loss * \
             sigmoid_rampup(epoch, rampup_length)
         for i, (source_imgs, source_labels, paths,
@@ -414,19 +414,52 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 supervised_loss, supervised_loss_items = compute_loss(student_pred, source_labels.to(
                     device))  # loss scaled by batch_size
 
-                # CONSISTENCY LOSS
-                student_pred_target_main_branch = student_model(student_imgs)[
-                    0]
+                # CONSISTENCY LOSS using NMS-based pseudo-labels from teacher
+                student_pred_target = student_model(student_imgs)
                 with torch.no_grad():
-                    teacher_pred_target_main_branch = teacher_model(teacher_imgs)[
-                        0]
-                consistency_loss = torch.tensor(0.0, device=device)
-                for student_tensor, teacher_tensor in zip(student_pred_target_main_branch,
-                                                          teacher_pred_target_main_branch):
-                    # consistency_loss += torch.norm(student_tensor-teacher_tensor, p=2)
-                    # consistency_loss = 1 - F.cosine_similarity(student_tensor, teacher_tensor, dim=-1).mean()
-                    consistency_loss += F.smooth_l1_loss(
-                        student_tensor, teacher_tensor, reduction='mean')
+                    teacher_pred_target = teacher_model(teacher_imgs)
+                    # Apply NMS to teacher predictions to get pseudo-labels
+                    teacher_nms_output = non_max_suppression(
+                        teacher_pred_target,
+                        conf_thres=0.25,
+                        iou_thres=0.45,
+                        max_det=50
+                    )
+                    # Convert NMS output to label format: [image_idx, class, cx, cy, w, h] (normalized)
+                    pseudo_labels_list = []
+                    img_h, img_w = teacher_imgs.shape[2:]
+                    for img_idx, det in enumerate(teacher_nms_output):
+                        if det is not None and len(det) > 0:
+                            # det format: [x1, y1, x2, y2, conf, cls]
+                            boxes_xyxy = det[:, :4]
+                            classes = det[:, 5]
+                            # Convert xyxy to xywh normalized
+                            cx = (
+                                (boxes_xyxy[:, 0] + boxes_xyxy[:, 2]) / 2) / img_w
+                            cy = (
+                                (boxes_xyxy[:, 1] + boxes_xyxy[:, 3]) / 2) / img_h
+                            w = (boxes_xyxy[:, 2] - boxes_xyxy[:, 0]) / img_w
+                            h = (boxes_xyxy[:, 3] - boxes_xyxy[:, 1]) / img_h
+                            img_indices = torch.full(
+                                (len(det),), img_idx, device=device, dtype=det.dtype)
+                            pseudo_labels = torch.stack(
+                                [img_indices, classes, cx, cy, w, h], dim=1)
+                            pseudo_labels_list.append(pseudo_labels)
+
+                    if pseudo_labels_list:
+                        pseudo_labels_batch = torch.cat(
+                            pseudo_labels_list, dim=0)
+                    else:
+                        pseudo_labels_batch = torch.zeros(
+                            (0, 6), device=device)
+
+                # Compute consistency loss using pseudo-labels
+                if pseudo_labels_batch.shape[0] > 0:
+                    consistency_loss, _ = compute_loss(
+                        student_pred_target, pseudo_labels_batch)
+                else:
+                    consistency_loss = torch.tensor(0.0, device=device)
+
                 combined_loss_items = torch.cat([
                     supervised_loss_items,
                     consistency_loss.detach().unsqueeze(0)
