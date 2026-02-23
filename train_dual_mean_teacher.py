@@ -435,19 +435,28 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                         if det is not None and len(det) > 0:
                             # det format: [x1, y1, x2, y2, conf, cls]
                             boxes_xyxy = det[:, :4]
-                            classes = det[:, 5]
+                            classes = det[:, 5].long().float()  # Ensure integer class indices
+                            # Clamp class indices to valid range
+                            classes = classes.clamp(0, nc - 1)
                             # Convert xyxy to xywh normalized
-                            cx = (
-                                (boxes_xyxy[:, 0] + boxes_xyxy[:, 2]) / 2) / img_w
-                            cy = (
-                                (boxes_xyxy[:, 1] + boxes_xyxy[:, 3]) / 2) / img_h
+                            cx = ((boxes_xyxy[:, 0] + boxes_xyxy[:, 2]) / 2) / img_w
+                            cy = ((boxes_xyxy[:, 1] + boxes_xyxy[:, 3]) / 2) / img_h
                             w = (boxes_xyxy[:, 2] - boxes_xyxy[:, 0]) / img_w
                             h = (boxes_xyxy[:, 3] - boxes_xyxy[:, 1]) / img_h
-                            img_indices = torch.full(
-                                (len(det),), img_idx, device=device, dtype=det.dtype)
-                            pseudo_labels = torch.stack(
-                                [img_indices, classes, cx, cy, w, h], dim=1)
-                            pseudo_labels_list.append(pseudo_labels)
+                            # Clamp to valid normalized range and filter invalid boxes
+                            cx = cx.clamp(0, 1)
+                            cy = cy.clamp(0, 1)
+                            w = w.clamp(1e-6, 1)
+                            h = h.clamp(1e-6, 1)
+                            # Filter out invalid detections (boxes with near-zero dimensions)
+                            valid_mask = (w > 0.001) & (h > 0.001)
+                            if valid_mask.sum() > 0:
+                                img_indices = torch.full(
+                                    (valid_mask.sum().item(),), img_idx, device=device, dtype=torch.float32)
+                                pseudo_labels = torch.stack(
+                                    [img_indices, classes[valid_mask], cx[valid_mask], cy[valid_mask], 
+                                     w[valid_mask], h[valid_mask]], dim=1)
+                                pseudo_labels_list.append(pseudo_labels)
 
                     if pseudo_labels_list:
                         pseudo_labels_batch = torch.cat(
