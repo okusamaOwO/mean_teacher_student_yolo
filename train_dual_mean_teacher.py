@@ -419,8 +419,11 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 with torch.no_grad():
                     teacher_pred_target = teacher_model(teacher_imgs)
                     # Apply NMS to teacher predictions to get pseudo-labels
+                    # YOLOv9 returns tuple: (inference_output, training_output), use [0] for NMS
+                    teacher_inference_out = teacher_pred_target[0] if isinstance(
+                        teacher_pred_target, (list, tuple)) else teacher_pred_target
                     teacher_nms_output = non_max_suppression(
-                        teacher_pred_target,
+                        teacher_inference_out,
                         conf_thres=0.25,
                         iou_thres=0.45,
                         max_det=50
