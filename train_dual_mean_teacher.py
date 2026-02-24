@@ -351,9 +351,13 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)
         student_optimizer.zero_grad()
         target_iter = iter(cycle(unsupervised_loader))
-        rampup_length = 10
+        rampup_length = 20
+        # Only apply consistency loss after warmup_epochs to let teacher stabilize
+        consistency_warmup_epochs = 10
         weight_for_consistency_loss = opt.weight_consistency_loss * \
-            sigmoid_rampup(epoch, rampup_length)
+            sigmoid_rampup(max(0, epoch - consistency_warmup_epochs), rampup_length) if epoch >= consistency_warmup_epochs else 0.0
+        # Adaptive confidence threshold: start high, decrease as teacher improves
+        pseudo_label_conf_thres = max(0.5, 0.7 - 0.02 * max(0, epoch - consistency_warmup_epochs))
         for i, (source_imgs, source_labels, paths,
                 _) in pbar:  # batch -------------------------------------------------------------
             target_imgs, _, target_paths, _ = next(target_iter)
@@ -415,60 +419,64 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     device))  # loss scaled by batch_size
 
                 # CONSISTENCY LOSS using NMS-based pseudo-labels from teacher
-                student_pred_target = student_model(student_imgs)
-                with torch.no_grad():
-                    teacher_pred_target = teacher_model(teacher_imgs)
-                    # Apply NMS to teacher predictions to get pseudo-labels
-                    # YOLOv9 returns tuple: (inference_output, training_output), use [0] for NMS
-                    teacher_inference_out = teacher_pred_target[0] if isinstance(
-                        teacher_pred_target, (list, tuple)) else teacher_pred_target
-                    teacher_nms_output = non_max_suppression(
-                        teacher_inference_out,
-                        conf_thres=0.25,
-                        iou_thres=0.45,
-                        max_det=50
-                    )
-                    # Convert NMS output to label format: [image_idx, class, cx, cy, w, h] (normalized)
-                    pseudo_labels_list = []
-                    img_h, img_w = teacher_imgs.shape[2:]
-                    for img_idx, det in enumerate(teacher_nms_output):
-                        if det is not None and len(det) > 0:
-                            # det format: [x1, y1, x2, y2, conf, cls]
-                            boxes_xyxy = det[:, :4]
-                            classes = det[:, 5].long().float()  # Ensure integer class indices
-                            # Clamp class indices to valid range
-                            classes = classes.clamp(0, nc - 1)
-                            # Convert xyxy to xywh normalized
-                            cx = ((boxes_xyxy[:, 0] + boxes_xyxy[:, 2]) / 2) / img_w
-                            cy = ((boxes_xyxy[:, 1] + boxes_xyxy[:, 3]) / 2) / img_h
-                            w = (boxes_xyxy[:, 2] - boxes_xyxy[:, 0]) / img_w
-                            h = (boxes_xyxy[:, 3] - boxes_xyxy[:, 1]) / img_h
-                            # Clamp to valid normalized range and filter invalid boxes
-                            cx = cx.clamp(0, 1)
-                            cy = cy.clamp(0, 1)
-                            w = w.clamp(1e-6, 1)
-                            h = h.clamp(1e-6, 1)
-                            # Filter out invalid detections (boxes with near-zero dimensions)
-                            valid_mask = (w > 0.001) & (h > 0.001)
-                            if valid_mask.sum() > 0:
-                                img_indices = torch.full(
-                                    (valid_mask.sum().item(),), img_idx, device=device, dtype=torch.float32)
-                                pseudo_labels = torch.stack(
-                                    [img_indices, classes[valid_mask], cx[valid_mask], cy[valid_mask], 
-                                     w[valid_mask], h[valid_mask]], dim=1)
-                                pseudo_labels_list.append(pseudo_labels)
+                # Skip consistency loss during warmup period
+                if weight_for_consistency_loss > 0:
+                    student_pred_target = student_model(student_imgs)
+                    with torch.no_grad():
+                        teacher_pred_target = teacher_model(teacher_imgs)
+                        # Apply NMS to teacher predictions to get pseudo-labels
+                        # YOLOv9 returns tuple: (inference_output, training_output), use [0] for NMS
+                        teacher_inference_out = teacher_pred_target[0] if isinstance(
+                            teacher_pred_target, (list, tuple)) else teacher_pred_target
+                        teacher_nms_output = non_max_suppression(
+                            teacher_inference_out,
+                            conf_thres=pseudo_label_conf_thres,  # Adaptive threshold
+                            iou_thres=0.45,
+                            max_det=30  # Reduced max detections for quality
+                        )
+                        # Convert NMS output to label format: [image_idx, class, cx, cy, w, h] (normalized)
+                        pseudo_labels_list = []
+                        img_h, img_w = teacher_imgs.shape[2:]
+                        for img_idx, det in enumerate(teacher_nms_output):
+                            if det is not None and len(det) > 0:
+                                # det format: [x1, y1, x2, y2, conf, cls]
+                                boxes_xyxy = det[:, :4]
+                                classes = det[:, 5].long().float()  # Ensure integer class indices
+                                # Clamp class indices to valid range
+                                classes = classes.clamp(0, nc - 1)
+                                # Convert xyxy to xywh normalized
+                                cx = ((boxes_xyxy[:, 0] + boxes_xyxy[:, 2]) / 2) / img_w
+                                cy = ((boxes_xyxy[:, 1] + boxes_xyxy[:, 3]) / 2) / img_h
+                                w = (boxes_xyxy[:, 2] - boxes_xyxy[:, 0]) / img_w
+                                h = (boxes_xyxy[:, 3] - boxes_xyxy[:, 1]) / img_h
+                                # Clamp to valid normalized range and filter invalid boxes
+                                cx = cx.clamp(0, 1)
+                                cy = cy.clamp(0, 1)
+                                w = w.clamp(1e-6, 1)
+                                h = h.clamp(1e-6, 1)
+                                # Filter out invalid detections (boxes with near-zero dimensions)
+                                valid_mask = (w > 0.001) & (h > 0.001)
+                                if valid_mask.sum() > 0:
+                                    img_indices = torch.full(
+                                        (valid_mask.sum().item(),), img_idx, device=device, dtype=torch.float32)
+                                    pseudo_labels = torch.stack(
+                                        [img_indices, classes[valid_mask], cx[valid_mask], cy[valid_mask], 
+                                         w[valid_mask], h[valid_mask]], dim=1)
+                                    pseudo_labels_list.append(pseudo_labels)
 
-                    if pseudo_labels_list:
-                        pseudo_labels_batch = torch.cat(
-                            pseudo_labels_list, dim=0)
+                        if pseudo_labels_list:
+                            pseudo_labels_batch = torch.cat(
+                                pseudo_labels_list, dim=0)
+                        else:
+                            pseudo_labels_batch = torch.zeros(
+                                (0, 6), device=device)
+
+                    # Compute consistency loss using pseudo-labels
+                    if pseudo_labels_batch.shape[0] > 0:
+                        consistency_loss, _ = compute_loss(
+                            student_pred_target, pseudo_labels_batch)
                     else:
-                        pseudo_labels_batch = torch.zeros(
-                            (0, 6), device=device)
-
-                # Compute consistency loss using pseudo-labels
-                if pseudo_labels_batch.shape[0] > 0:
-                    consistency_loss, _ = compute_loss(
-                        student_pred_target, pseudo_labels_batch)
+                        consistency_loss = torch.tensor(0.0, device=device)
                 else:
                     consistency_loss = torch.tensor(0.0, device=device)
 
