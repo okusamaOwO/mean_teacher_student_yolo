@@ -355,9 +355,11 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         # Only apply consistency loss after warmup_epochs to let teacher stabilize
         consistency_warmup_epochs = 10
         weight_for_consistency_loss = opt.weight_consistency_loss * \
-            sigmoid_rampup(max(0, epoch - consistency_warmup_epochs), rampup_length) if epoch >= consistency_warmup_epochs else 0.0
+            sigmoid_rampup(max(0, epoch - consistency_warmup_epochs),
+                           rampup_length) if epoch >= consistency_warmup_epochs else 0.0
         # Adaptive confidence threshold: start high, decrease as teacher improves
-        pseudo_label_conf_thres = max(0.5, 0.7 - 0.02 * max(0, epoch - consistency_warmup_epochs))
+        pseudo_label_conf_thres = max(
+            0.5, 0.7 - 0.02 * max(0, epoch - consistency_warmup_epochs))
         for i, (source_imgs, source_labels, paths,
                 _) in pbar:  # batch -------------------------------------------------------------
             target_imgs, _, target_paths, _ = next(target_iter)
@@ -418,6 +420,38 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 supervised_loss, supervised_loss_items = compute_loss(student_pred, source_labels.to(
                     device))  # loss scaled by batch_size
 
+                # DEBUG: Visualize teacher predictions on first image of first batch (runs every epoch)
+                if i == 0:
+                    import cv2
+                    with torch.no_grad():
+                        teacher_pred_debug = teacher_model(teacher_imgs)
+                        teacher_inf_debug = teacher_pred_debug[0] if isinstance(
+                            teacher_pred_debug, (list, tuple)) else teacher_pred_debug
+                        teacher_nms_debug = non_max_suppression(
+                            teacher_inf_debug,
+                            conf_thres=0.25,  # Use fixed threshold for debug visualization
+                            iou_thres=0.45,
+                            max_det=30
+                        )
+                        # Get first image and convert to numpy (H, W, C) format
+                        vis_img = (teacher_imgs[0].cpu().permute(
+                            1, 2, 0).numpy() * 255).astype(np.uint8).copy()
+                        vis_img = cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR)
+                        det = teacher_nms_debug[0]
+                        if det is not None and len(det) > 0:
+                            for box in det:
+                                x1, y1, x2, y2, conf, cls = box.cpu().numpy()
+                                x1, y1, x2, y2 = int(x1), int(
+                                    y1), int(x2), int(y2)
+                                cv2.rectangle(vis_img, (x1, y1),
+                                              (x2, y2), (0, 255, 0), 2)
+                                cv2.putText(vis_img, f'{int(cls)}:{conf:.2f}', (x1, y1 - 5),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                        cv2.imwrite(
+                            str(save_dir / f'teacher_pred_epoch{epoch}.jpg'), vis_img)
+                        LOGGER.info(
+                            f'Saved teacher prediction visualization: {save_dir}/teacher_pred_epoch{epoch}.jpg ({len(det) if det is not None else 0} boxes)')
+                exit()
                 # CONSISTENCY LOSS using NMS-based pseudo-labels from teacher
                 # Skip consistency loss during warmup period
                 if weight_for_consistency_loss > 0:
@@ -434,6 +468,29 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                             iou_thres=0.45,
                             max_det=30  # Reduced max detections for quality
                         )
+
+                        # DEBUG: Visualize teacher predictions on first image of first batch
+                        if i == 0 and epoch >= consistency_warmup_epochs:
+                            import cv2
+                            # Get first image and convert to numpy (H, W, C) format
+                            vis_img = (teacher_imgs[0].cpu().permute(
+                                1, 2, 0).numpy() * 255).astype(np.uint8).copy()
+                            vis_img = cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR)
+                            det = teacher_nms_output[0]
+                            if det is not None and len(det) > 0:
+                                for box in det:
+                                    x1, y1, x2, y2, conf, cls = box.cpu().numpy()
+                                    x1, y1, x2, y2 = int(x1), int(
+                                        y1), int(x2), int(y2)
+                                    cv2.rectangle(
+                                        vis_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                                    cv2.putText(vis_img, f'{int(cls)}:{conf:.2f}', (x1, y1 - 5),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                            cv2.imwrite(
+                                str(save_dir / f'teacher_pred_epoch{epoch}.jpg'), vis_img)
+                            LOGGER.info(
+                                f'Saved teacher prediction visualization to {save_dir}/teacher_pred_epoch{epoch}.jpg ({len(det) if det is not None else 0} boxes)')
+
                         # Convert NMS output to label format: [image_idx, class, cx, cy, w, h] (normalized)
                         pseudo_labels_list = []
                         img_h, img_w = teacher_imgs.shape[2:]
@@ -441,14 +498,19 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                             if det is not None and len(det) > 0:
                                 # det format: [x1, y1, x2, y2, conf, cls]
                                 boxes_xyxy = det[:, :4]
-                                classes = det[:, 5].long().float()  # Ensure integer class indices
+                                # Ensure integer class indices
+                                classes = det[:, 5].long().float()
                                 # Clamp class indices to valid range
                                 classes = classes.clamp(0, nc - 1)
                                 # Convert xyxy to xywh normalized
-                                cx = ((boxes_xyxy[:, 0] + boxes_xyxy[:, 2]) / 2) / img_w
-                                cy = ((boxes_xyxy[:, 1] + boxes_xyxy[:, 3]) / 2) / img_h
-                                w = (boxes_xyxy[:, 2] - boxes_xyxy[:, 0]) / img_w
-                                h = (boxes_xyxy[:, 3] - boxes_xyxy[:, 1]) / img_h
+                                cx = (
+                                    (boxes_xyxy[:, 0] + boxes_xyxy[:, 2]) / 2) / img_w
+                                cy = (
+                                    (boxes_xyxy[:, 1] + boxes_xyxy[:, 3]) / 2) / img_h
+                                w = (boxes_xyxy[:, 2] -
+                                     boxes_xyxy[:, 0]) / img_w
+                                h = (boxes_xyxy[:, 3] -
+                                     boxes_xyxy[:, 1]) / img_h
                                 # Clamp to valid normalized range and filter invalid boxes
                                 cx = cx.clamp(0, 1)
                                 cy = cy.clamp(0, 1)
@@ -460,7 +522,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                     img_indices = torch.full(
                                         (valid_mask.sum().item(),), img_idx, device=device, dtype=torch.float32)
                                     pseudo_labels = torch.stack(
-                                        [img_indices, classes[valid_mask], cx[valid_mask], cy[valid_mask], 
+                                        [img_indices, classes[valid_mask], cx[valid_mask], cy[valid_mask],
                                          w[valid_mask], h[valid_mask]], dim=1)
                                     pseudo_labels_list.append(pseudo_labels)
 
