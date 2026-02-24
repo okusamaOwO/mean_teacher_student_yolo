@@ -423,10 +423,11 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 # DEBUG: Visualize teacher predictions on first image of first batch (runs every epoch)
                 if i == 0:
                     import cv2
+                    teacher_model.eval()  # Switch to eval mode for inference
                     with torch.no_grad():
                         teacher_pred_debug = teacher_model(teacher_imgs)
-                        teacher_inf_debug = teacher_pred_debug[0] if isinstance(
-                            teacher_pred_debug, (list, tuple)) else teacher_pred_debug
+                        # YOLOv9 DualDDetect: use pred[0][1] to match detect_dual.py
+                        teacher_inf_debug = teacher_pred_debug[0][1]
                         teacher_nms_debug = non_max_suppression(
                             teacher_inf_debug,
                             conf_thres=0.25,  # Use fixed threshold for debug visualization
@@ -451,45 +452,24 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                             str(save_dir / f'teacher_pred_epoch{epoch}.jpg'), vis_img)
                         LOGGER.info(
                             f'Saved teacher prediction visualization: {save_dir}/teacher_pred_epoch{epoch}.jpg ({len(det) if det is not None else 0} boxes)')
-                exit()
+                    teacher_model.train()  # Switch back to train mode
+
                 # CONSISTENCY LOSS using NMS-based pseudo-labels from teacher
                 # Skip consistency loss during warmup period
                 if weight_for_consistency_loss > 0:
                     student_pred_target = student_model(student_imgs)
+                    teacher_model.eval()  # Switch to eval mode for inference
                     with torch.no_grad():
                         teacher_pred_target = teacher_model(teacher_imgs)
                         # Apply NMS to teacher predictions to get pseudo-labels
-                        # YOLOv9 returns tuple: (inference_output, training_output), use [0] for NMS
-                        teacher_inference_out = teacher_pred_target[0] if isinstance(
-                            teacher_pred_target, (list, tuple)) else teacher_pred_target
+                        # YOLOv9 DualDDetect: use pred[0][1] to match detect_dual.py
+                        teacher_inference_out = teacher_pred_target[0][1]
                         teacher_nms_output = non_max_suppression(
                             teacher_inference_out,
                             conf_thres=pseudo_label_conf_thres,  # Adaptive threshold
                             iou_thres=0.45,
                             max_det=30  # Reduced max detections for quality
                         )
-
-                        # DEBUG: Visualize teacher predictions on first image of first batch
-                        if i == 0 and epoch >= consistency_warmup_epochs:
-                            import cv2
-                            # Get first image and convert to numpy (H, W, C) format
-                            vis_img = (teacher_imgs[0].cpu().permute(
-                                1, 2, 0).numpy() * 255).astype(np.uint8).copy()
-                            vis_img = cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR)
-                            det = teacher_nms_output[0]
-                            if det is not None and len(det) > 0:
-                                for box in det:
-                                    x1, y1, x2, y2, conf, cls = box.cpu().numpy()
-                                    x1, y1, x2, y2 = int(x1), int(
-                                        y1), int(x2), int(y2)
-                                    cv2.rectangle(
-                                        vis_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                                    cv2.putText(vis_img, f'{int(cls)}:{conf:.2f}', (x1, y1 - 5),
-                                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                            cv2.imwrite(
-                                str(save_dir / f'teacher_pred_epoch{epoch}.jpg'), vis_img)
-                            LOGGER.info(
-                                f'Saved teacher prediction visualization to {save_dir}/teacher_pred_epoch{epoch}.jpg ({len(det) if det is not None else 0} boxes)')
 
                         # Convert NMS output to label format: [image_idx, class, cx, cy, w, h] (normalized)
                         pseudo_labels_list = []
@@ -533,12 +513,38 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                             pseudo_labels_batch = torch.zeros(
                                 (0, 6), device=device)
 
+                        # DEBUG: Visualize pseudo-labels on first image of first batch
+                        if i == 0:
+                            import cv2
+                            vis_img = (teacher_imgs[0].cpu().permute(
+                                1, 2, 0).numpy() * 255).astype(np.uint8).copy()
+                            vis_img = cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR)
+                            img_h_vis, img_w_vis = vis_img.shape[:2]
+                            # Filter pseudo-labels for first image (img_idx == 0)
+                            first_img_labels = pseudo_labels_batch[pseudo_labels_batch[:, 0] == 0]
+                            for label in first_img_labels:
+                                _, cls, cx, cy, w, h = label.cpu().numpy()
+                                # Convert normalized xywh to pixel xyxy
+                                x1 = int((cx - w / 2) * img_w_vis)
+                                y1 = int((cy - h / 2) * img_h_vis)
+                                x2 = int((cx + w / 2) * img_w_vis)
+                                y2 = int((cy + h / 2) * img_h_vis)
+                                cv2.rectangle(vis_img, (x1, y1),
+                                              (x2, y2), (0, 255, 0), 2)
+                                cv2.putText(vis_img, f'{int(cls)}', (x1, y1 - 5),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                            cv2.imwrite(
+                                str(save_dir / f'pseudo_labels_epoch{epoch}.jpg'), vis_img)
+                            LOGGER.info(
+                                f'Saved pseudo-labels visualization: {save_dir}/pseudo_labels_epoch{epoch}.jpg ({len(first_img_labels)} boxes)')
+
                     # Compute consistency loss using pseudo-labels
                     if pseudo_labels_batch.shape[0] > 0:
                         consistency_loss, _ = compute_loss(
                             student_pred_target, pseudo_labels_batch)
                     else:
                         consistency_loss = torch.tensor(0.0, device=device)
+                    teacher_model.train()  # Switch back to train mode
                 else:
                     consistency_loss = torch.tensor(0.0, device=device)
 
