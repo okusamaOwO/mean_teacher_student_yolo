@@ -351,9 +351,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)
         student_optimizer.zero_grad()
         target_iter = iter(cycle(unsupervised_loader))
-        rampup_length = 20
+        rampup_length = 10
         # Only apply consistency loss after warmup_epochs to let teacher stabilize
-        consistency_warmup_epochs = 10
+        consistency_warmup_epochs = 15
         weight_for_consistency_loss = opt.weight_consistency_loss * \
             sigmoid_rampup(max(0, epoch - consistency_warmup_epochs),
                            rampup_length) if epoch >= consistency_warmup_epochs else 0.0
@@ -433,8 +433,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                         teacher_nms_output = non_max_suppression(
                             teacher_inference_out,
                             conf_thres=pseudo_label_conf_thres,  # Adaptive threshold
-                            iou_thres=0.45,
-                            max_det=30  # Reduced max detections for quality
+                            iou_thres=0.5,
+                            max_det=50  # Reduced max detections for quality
                         )
 
                         # Convert NMS output to label format: [image_idx, class, cx, cy, w, h] (normalized)
