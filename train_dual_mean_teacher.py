@@ -358,8 +358,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             sigmoid_rampup(max(0, epoch - consistency_warmup_epochs),
                            rampup_length) if epoch >= consistency_warmup_epochs else 0.0
         # Adaptive confidence threshold: start high, decrease as teacher improves
-        pseudo_label_conf_thres = max(
-            0.5, 0.7 - 0.02 * max(0, epoch - consistency_warmup_epochs))
+        pseudo_label_conf_thres = 0.3
         for i, (source_imgs, source_labels, paths,
                 _) in pbar:  # batch -------------------------------------------------------------
             target_imgs, _, target_paths, _ = next(target_iter)
@@ -420,13 +419,24 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 supervised_loss, supervised_loss_items = compute_loss(student_pred, source_labels.to(
                     device))  # loss scaled by batch_size
 
-                # CONSISTENCY LOSS using NMS-based pseudo-labels from teacher
+                # HYBRID CONSISTENCY LOSS: NMS pseudo-labels + Raw output distillation
                 # Skip consistency loss during warmup period
                 if weight_for_consistency_loss > 0:
                     student_pred_target = student_model(student_imgs)
                     teacher_model.eval()  # Switch to eval mode for inference
                     with torch.no_grad():
                         teacher_pred_target = teacher_model(teacher_imgs)
+
+                    # === Part 1: Raw output distillation loss (soft knowledge) ===
+                    raw_distill_loss = torch.tensor(0.0, device=device)
+                    student_main_branch = student_pred_target[0]  # List of feature tensors
+                    teacher_main_branch = teacher_pred_target[0]  # List of feature tensors
+                    for student_tensor, teacher_tensor in zip(student_main_branch, teacher_main_branch):
+                        raw_distill_loss += F.smooth_l1_loss(
+                            student_tensor, teacher_tensor, reduction='mean')
+
+                    # === Part 2: NMS-based pseudo-label loss (hard knowledge) ===
+                    with torch.no_grad():
                         # Apply NMS to teacher predictions to get pseudo-labels
                         # YOLOv9 DualDDetect: use pred[0][1] to match detect_dual.py
                         teacher_inference_out = teacher_pred_target[0][1]
@@ -479,12 +489,15 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                             pseudo_labels_batch = torch.zeros(
                                 (0, 6), device=device)
 
-                    # Compute consistency loss using pseudo-labels
+                    # Compute NMS-based pseudo-label loss
                     if pseudo_labels_batch.shape[0] > 0:
-                        consistency_loss, _ = compute_loss(
+                        nms_pseudo_loss, _ = compute_loss(
                             student_pred_target, pseudo_labels_batch)
                     else:
-                        consistency_loss = torch.tensor(0.0, device=device)
+                        nms_pseudo_loss = torch.tensor(0.0, device=device)
+
+                    consistency_loss = nms_pseudo_loss + raw_distill_loss
+
                     teacher_model.train()  # Switch back to train mode
                 else:
                     consistency_loss = torch.tensor(0.0, device=device)
