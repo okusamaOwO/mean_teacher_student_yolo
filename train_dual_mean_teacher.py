@@ -423,7 +423,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 # Skip consistency loss during warmup period
                 if weight_for_consistency_loss > 0:
                     student_pred_target = student_model(student_imgs)
-                    teacher_model.eval()  # Switch to eval mode for inference
                     with torch.no_grad():
                         teacher_pred_target = teacher_model(teacher_imgs)
 
@@ -434,8 +433,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     for student_tensor, teacher_tensor in zip(student_main_branch, teacher_main_branch):
                         raw_distill_loss += F.smooth_l1_loss(
                             student_tensor, teacher_tensor, reduction='mean')
-
-                    # === Part 2: NMS-based pseudo-label loss (hard knowledge) ===
+                        
+                    teacher_model.eval()  # Switch to eval mode for inference
                     with torch.no_grad():
                         # Apply NMS to teacher predictions to get pseudo-labels
                         # YOLOv9 DualDDetect: use pred[0][1] to match detect_dual.py
