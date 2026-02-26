@@ -2,7 +2,7 @@ import torch
 import numpy as np
 
 
-def apply_mixstyle_custom(source_imgs, target_imgs, p=0.5, alpha=0.1, eps=1e-6):
+def apply_mixstyle_custom(source_imgs, target_imgs, p=0.5, alpha=0.1, beta = 0.1, eps=1e-6):
     """
     Args:
         source_imgs: Batch of source images (B, C, H, W)
@@ -45,7 +45,7 @@ def apply_mixstyle_custom(source_imgs, target_imgs, p=0.5, alpha=0.1, eps=1e-6):
     # to allow for diversity, or you can sample 1 scalar for the whole batch.
     # Standard MixStyle samples element-wise (N, C, 1, 1) or batch-wise (N, 1, 1, 1).
     N = X.size(0)
-    beta_dist = torch.distributions.Beta(alpha, alpha)
+    beta_dist = torch.distributions.Beta(alpha, beta)
     lmda = beta_dist.sample((N, 1, 1, 1)).to(X.device)
 
     # Mix the statistics

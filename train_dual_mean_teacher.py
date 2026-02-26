@@ -361,23 +361,31 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             callbacks.run('on_train_batch_start')
             # number integrated batches (since train start)
             ni = i + nb * epoch
-            # teacher_imgs = add_weak_augmentation(target_imgs)
-            # student_imgs = add_strong_augmentation(teacher_imgs)
 
             # uint8 to float32, 0-255 to 0.0-1.0
             source_imgs = source_imgs.to(
                 device, non_blocking=True).float() / 255
             target_imgs = target_imgs.to(
                 device, non_blocking=True).float() / 255
-            teacher_imgs = target_imgs.clone()
+            target_imgs = add_weak_augmentation(target_imgs)
 
             # Apply mixstyle augmentation
             B = source_imgs.size(0)
             mixed_output = apply_mixstyle_custom(
-                source_imgs, target_imgs, p=0.5, alpha=0.1)
-            source_imgs = mixed_output[0:B]
-            student_imgs = mixed_output[B:]
+                source_imgs, target_imgs, p=1, alpha=1, beta=10)
+            style_modified_source_imgs = mixed_output[0:B]
+            style_modified_target_imgs = mixed_output[B:]
 
+            # Apply teacher augmentation and student augmentation 
+            student_imgs = add_strong_augmentation(target_imgs)
+            style_modified_student_imgs = add_strong_augmentation(style_modified_target_imgs)
+
+            # Merge it with original images # double batch 
+            source_imgs = torch.cat((source_imgs, style_modified_source_imgs), dim=0)
+            student_imgs = torch.cat((student_imgs, style_modified_student_imgs), dim=0) 
+            teacher_imgs = torch.cat((target_imgs, target_imgs), dim=0)  # Teacher sees original and augmented
+            source_labels = torch.cat((source_labels, source_labels), dim=0)  # Duplicate labels for augmented data
+            
             # Warmup
             if ni <= nw:
                 xi = [0, nw]  # x interp
