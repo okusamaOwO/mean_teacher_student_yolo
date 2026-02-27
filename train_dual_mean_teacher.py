@@ -386,7 +386,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             source_imgs = torch.cat((source_imgs, style_modified_source_imgs), dim=0)
             student_imgs = torch.cat((student_imgs, style_modified_target_imgs), dim=0) 
             teacher_imgs = torch.cat((target_imgs, target_imgs), dim=0)  # Teacher sees original and augmented
-            source_labels = torch.cat((source_labels, source_labels), dim=0)  # Duplicate labels for augmented data
+            extra_labels = source_labels.clone()
+            extra_labels[:, 0] += B
+            source_labels = torch.cat((source_labels, extra_labels), dim=0)
             
             # Warmup
             if ni <= nw:
