@@ -375,16 +375,10 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             
             # Apply mixstyle augmentation
             B = source_imgs.size(0)
-            mixed_output = apply_mixstyle_custom(
-                source_imgs, target_imgs, p=1, alpha=1, beta=10)
-            
-            style_modified_source_imgs = mixed_output[0:B]
-            style_modified_target_imgs = mixed_output[B:]
-
             
             # Merge it with original images # double batch 
-            source_imgs = torch.cat((source_imgs, style_modified_source_imgs), dim=0)
-            student_imgs = torch.cat((student_imgs, style_modified_target_imgs), dim=0) 
+            source_imgs = torch.cat((source_imgs, source_imgs), dim=0)
+            student_imgs = torch.cat((student_imgs, student_imgs), dim=0) 
             teacher_imgs = torch.cat((target_imgs, target_imgs), dim=0)  # Teacher sees original and augmented
             extra_labels = source_labels.clone()
             extra_labels[:, 0] += B
