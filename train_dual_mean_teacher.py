@@ -371,7 +371,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             target_imgs = target_imgs.to(
                 device, non_blocking=True).float() / 255
             
-
+            print(f"device of source_imgs: {source_imgs.device}, dtype of target imgs: {target_imgs.dtype}")
             # Apply mixstyle augmentation
             B = source_imgs.size(0)
             mixed_output = apply_mixstyle_custom(
