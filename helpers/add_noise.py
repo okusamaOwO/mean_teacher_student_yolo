@@ -1,6 +1,7 @@
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import torch
+import numpy as np
 
 # ==========================================
 # 1. Define The Pipelines
@@ -43,11 +44,12 @@ to_tensor = ToTensorV2()
 def add_weak_augmentation(batch_imgs: torch.Tensor) -> torch.Tensor:
     """
     Applies WEAK (Geometric) augmentation.
-    Input: [B, 3, H, W] float32 in [0,1]
-    Output: [B, 3, H, W] float32 in [0,1]
+    Input: [B, 3, H, W] (0-255)
+    Output: [B, 3, H, W] (0-255, float32)
     """
-    imgs = batch_imgs.detach().clamp(0, 1)
-    imgs = (imgs * 255).round().to(torch.uint8).cpu()
+    imgs = batch_imgs.detach().cpu()
+    if imgs.dtype != torch.uint8:
+        imgs = imgs.to(torch.uint8)
 
     out_tensors = []
 
@@ -60,9 +62,9 @@ def add_weak_augmentation(batch_imgs: torch.Tensor) -> torch.Tensor:
         augmented = aug_geometric(image=img_np)['image']
 
         # Convert to Tensor
-        out_tensors.append(to_tensor(image=augmented)['image'].float() / 255.0)
+        out_tensors.append(to_tensor(image=augmented)['image'])
 
-    return torch.stack(out_tensors, dim=0)
+    return torch.stack(out_tensors, dim=0).float()
 
 
 def add_strong_augmentation(teacher_batch_imgs: torch.Tensor) -> torch.Tensor:
@@ -72,20 +74,23 @@ def add_strong_augmentation(teacher_batch_imgs: torch.Tensor) -> torch.Tensor:
     CRITICAL NOTE: This function expects the input to ALREADY be the 
     geometrically transformed image (the output of augment_teacher_img).
     This ensures the Student and Teacher are looking at the same 'Crop/Flip'.
-    Input: [B, 3, H, W] float32 in [0,1]
-    Output: [B, 3, H, W] float32 in [0,1]
+    Input: [B, 3, H, W] (0-1, float32)
+    Output: [B, 3, H, W] (0-1, float32)
     """
-    imgs = teacher_batch_imgs.detach().clamp(0, 1)
-    imgs = (imgs * 255).round().to(torch.uint8).cpu()
+    imgs = teacher_batch_imgs.detach().cpu()
+    imgs = (imgs * 255).to(torch.uint8)
+    # Albumentations ColorJitter works best with uint8 0-255
+    if imgs.dtype != torch.uint8:
+        imgs = imgs.to(torch.uint8)
 
     out_tensors = []
     for img in imgs:
         img_np = img.permute(1, 2, 0).numpy()  # [H, W, 3]
 
         # Apply Strong/Pixel Augmentation
-        augmented = aug_pixel_distortion(image=img_np)['image']
+        augmented = aug_pixel_distortion(image=img_np)['image']/255.0
 
         # Convert to Tensor
-        out_tensors.append(to_tensor(image=augmented)['image'].float() / 255.0)
+        out_tensors.append(to_tensor(image=augmented)['image'])
 
-    return torch.stack(out_tensors, dim=0)
+    return torch.stack(out_tensors, dim=0).float()
