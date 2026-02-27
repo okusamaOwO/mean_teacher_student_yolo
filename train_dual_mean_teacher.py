@@ -360,7 +360,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             target_imgs, _, target_paths, _ = next(target_iter)
             # apply augmentation 
             target_imgs = add_weak_augmentation(target_imgs) 
-
+            student_imgs = add_strong_augmentation(target_imgs)
             callbacks.run('on_train_batch_start')
             # number integrated batches (since train start)
             ni = i + nb * epoch
@@ -370,8 +370,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 device, non_blocking=True).float() / 255
             target_imgs = target_imgs.to(
                 device, non_blocking=True).float() / 255
+            student_imgs = student_imgs.to(
+                device, non_blocking=True).float() / 255
             
-            print(f"device of source_imgs: {source_imgs.device}, dtype of target imgs: {target_imgs.dtype}")
             # Apply mixstyle augmentation
             B = source_imgs.size(0)
             mixed_output = apply_mixstyle_custom(
@@ -380,14 +381,10 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             style_modified_source_imgs = mixed_output[0:B]
             style_modified_target_imgs = mixed_output[B:]
 
-            # Apply teacher augmentation and student augmentation 
-            student_imgs = add_strong_augmentation(target_imgs).to(
-                device, non_blocking=True).float()
-            style_modified_student_imgs = add_strong_augmentation(style_modified_target_imgs).to(
-                device, non_blocking=True).float()
+            
             # Merge it with original images # double batch 
             source_imgs = torch.cat((source_imgs, style_modified_source_imgs), dim=0)
-            student_imgs = torch.cat((student_imgs, style_modified_student_imgs), dim=0) 
+            student_imgs = torch.cat((student_imgs, style_modified_target_imgs), dim=0) 
             teacher_imgs = torch.cat((target_imgs, target_imgs), dim=0)  # Teacher sees original and augmented
             source_labels = torch.cat((source_labels, source_labels), dim=0)  # Duplicate labels for augmented data
             
@@ -446,7 +443,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     consistency_loss.detach().unsqueeze(0)
                 ])
 
-                total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss
+                total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss * source_imgs.shape[0]
                 # unsupervised learning with target data
                 if RANK != -1:
                     total_loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode

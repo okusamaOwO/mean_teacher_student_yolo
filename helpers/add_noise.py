@@ -74,11 +74,9 @@ def add_strong_augmentation(teacher_batch_imgs: torch.Tensor) -> torch.Tensor:
     CRITICAL NOTE: This function expects the input to ALREADY be the 
     geometrically transformed image (the output of augment_teacher_img).
     This ensures the Student and Teacher are looking at the same 'Crop/Flip'.
-    Input: [B, 3, H, W] (0-1, float32)
-    Output: [B, 3, H, W] (0-1, float32)
     """
     imgs = teacher_batch_imgs.detach().cpu()
-    imgs = (imgs * 255).to(torch.uint8)
+
     # Albumentations ColorJitter works best with uint8 0-255
     if imgs.dtype != torch.uint8:
         imgs = imgs.to(torch.uint8)
@@ -88,7 +86,7 @@ def add_strong_augmentation(teacher_batch_imgs: torch.Tensor) -> torch.Tensor:
         img_np = img.permute(1, 2, 0).numpy()  # [H, W, 3]
 
         # Apply Strong/Pixel Augmentation
-        augmented = aug_pixel_distortion(image=img_np)['image']/255.0
+        augmented = aug_pixel_distortion(image=img_np)['image']
 
         # Convert to Tensor
         out_tensors.append(to_tensor(image=augmented)['image'])
