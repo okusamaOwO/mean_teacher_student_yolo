@@ -548,6 +548,10 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
             # Save model
             if (not nosave) or (final_epoch and not evolve):  # if save
+                # Temporarily remove hooks before deepcopy (local closures can't be pickled)
+                for h in _student_hooks + _teacher_hooks:
+                    h.remove()
+
                 ckpt = {
                     'epoch': epoch,
                     'best_fitness': best_fitness,
@@ -560,9 +564,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     'date': datetime.now().isoformat()}
 
                 # Save last, best and delete
-                # Temporarily remove hooks (local closures can't be pickled)
-                for h in _student_hooks + _teacher_hooks:
-                    h.remove()
                 torch.save(ckpt, last)
                 if best_fitness == fi:
                     torch.save(ckpt, best)
