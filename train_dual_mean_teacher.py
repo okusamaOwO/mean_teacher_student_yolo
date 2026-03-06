@@ -403,7 +403,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)
         student_optimizer.zero_grad()
         target_iter = iter(cycle(unsupervised_loader))
-        weight_for_consistency_loss = opt.weight_consistency_loss
+        weight_for_consistency_loss = opt.weight_consistency_loss if epoch >= 10 else 0.0
         for i, (source_imgs, source_labels, paths,
                 _) in pbar:  # batch -------------------------------------------------------------
             target_imgs, _, target_paths, _ = next(target_iter)
