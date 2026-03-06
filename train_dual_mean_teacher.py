@@ -19,6 +19,27 @@ from models.yolo import Model
 from models.experimental import attempt_load
 import val_dual as validate  # for end-of-epoch mAP
 from itertools import cycle
+from utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, select_device, smart_DDP, smart_optimizer,
+                               smart_resume, torch_distributed_zero_first)
+from utils.plots import plot_evolve
+from utils.metrics import fitness
+from utils.loss_tal_dual import ComputeLoss
+from utils.loggers.comet.comet_utils import check_comet_resume
+from utils.loggers import Loggers
+from utils.general import (LOGGER, TQDM_BAR_FORMAT, check_amp, check_dataset, check_file, check_git_info,
+                           check_git_status, check_img_size, check_requirements, check_suffix, check_yaml, colorstr,
+                           get_latest_run, increment_path, init_seeds, intersect_dicts, labels_to_class_weights,
+                           labels_to_image_weights, methods, one_cycle, print_args, print_mutation, strip_optimizer,
+                           yaml_save, one_flat_cycle, non_max_suppression)
+from utils.downloads import attempt_download, is_url
+from utils.dataloaders import create_dataloader
+from utils.callbacks import Callbacks
+from utils.autobatch import check_train_batch_size
+from utils.autoanchor import check_anchors
+from models.yolo import Model
+from models.experimental import attempt_load
+import val_dual as validate  # for end-of-epoch mAP
+from itertools import cycle
 import argparse
 import math
 import os
@@ -298,6 +319,30 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     teacher_model = deepcopy(student_model)
     for param in teacher_model.parameters():
         param.requires_grad = False  # Ensure teacher doesn't need gradients
+
+    # ----- Feature map hooks for layers 7 & 8 -----
+    student_feats = {}
+    teacher_feats = {}
+
+    def _make_hook(storage, key):
+        def hook(module, input, output):
+            storage[key] = output
+        return hook
+
+    _student_hooks = [
+        de_parallel(student_model).model[7].register_forward_hook(
+            _make_hook(student_feats, 7)),
+        de_parallel(student_model).model[8].register_forward_hook(
+            _make_hook(student_feats, 8)),
+    ]
+    _teacher_hooks = [
+        de_parallel(teacher_model).model[7].register_forward_hook(
+            _make_hook(teacher_feats, 7)),
+        de_parallel(teacher_model).model[8].register_forward_hook(
+            _make_hook(teacher_feats, 8)),
+    ]
+    # -----------------------------------------------
+
     # Start training
     t0 = time.time()
     nb = len(train_loader)  # number of batches
@@ -312,6 +357,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
     stopper, stop = EarlyStopping(patience=opt.patience), False
     compute_loss = ComputeLoss(student_model)  # init loss class
+    mse_loss_fn = nn.MSELoss()
 
     callbacks.run('on_train_start')
     LOGGER.info(f'Image sizes {imgsz} train, {imgsz} val\n'
@@ -411,25 +457,12 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     device))  # loss scaled by batch_size
 
                 # CONSISTENCY LOSS
-                student_pred_target = student_model(imgs_student)[0]
+                student_pred_target = student_model(imgs_student)
                 with torch.no_grad():
-                    teacher_pred_target = teacher_model(imgs_teacher)[0]
-                consistency_loss = torch.tensor(0.0, device=device)
-                for student_tensor, teacher_tensor in zip(student_pred_target,
-                                                          teacher_pred_target):
-                    # consistency_loss += torch.norm(student_tensor-teacher_tensor, p=2)
-                    # consistency_loss = 1 - F.cosine_similarity(student_tensor, teacher_tensor, dim=-1).mean()
-                    consistency_loss += F.smooth_l1_loss(
-                        student_tensor, teacher_tensor, reduction='mean')
-
-                # Scale consistency_loss by batch_size to match supervised_loss scaling
-                consistency_loss = consistency_loss * source_imgs.shape[0]
-
-                combined_loss_items = torch.cat([
-                    supervised_loss_items,
-                    consistency_loss.detach().unsqueeze(0)/source_imgs.shape[0]
-                ])
-
+                    teacher_pred_target = teacher_model(imgs_teacher)
+                # consistency_loss = torch.tensor(0.0, device=device)
+                consistency_loss = mse_loss_fn(student_feats[7], teacher_feats[7]) + mse_loss_fn(student_feats[8], teacher_feats[8])
+                print(f"supervised_loss: {supervised_loss}, consistency_loss: {consistency_loss}, weight_for_consistency_loss: {weight_for_consistency_loss}")
                 total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss
                 # unsupervised learning with target data
                 if RANK != -1:
@@ -563,6 +596,11 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                             mloss) + list(results) + lr, epoch, best_fitness, fi)
 
         callbacks.run('on_train_end', last, best, epoch, results)
+
+    # Remove feature map hooks
+    for h in _student_hooks + _teacher_hooks:
+        h.remove()
+
     torch.cuda.empty_cache()
     return results
 
