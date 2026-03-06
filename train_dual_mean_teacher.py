@@ -564,12 +564,28 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     'date': datetime.now().isoformat()}
 
                 # Save last, best and delete
+                # Temporarily remove hooks (local closures can't be pickled)
+                for h in _student_hooks + _teacher_hooks:
+                    h.remove()
                 torch.save(ckpt, last)
                 if best_fitness == fi:
                     torch.save(ckpt, best)
                 if opt.save_period > 0 and epoch % opt.save_period == 0:
                     torch.save(ckpt, w / f'epoch{epoch}.pt')
                 del ckpt
+                # Re-register hooks after saving
+                _student_hooks[:] = [
+                    de_parallel(student_model).model[7].register_forward_hook(
+                        _make_hook(student_feats, 7)),
+                    de_parallel(student_model).model[8].register_forward_hook(
+                        _make_hook(student_feats, 8)),
+                ]
+                _teacher_hooks[:] = [
+                    de_parallel(teacher_model).model[7].register_forward_hook(
+                        _make_hook(teacher_feats, 7)),
+                    de_parallel(teacher_model).model[8].register_forward_hook(
+                        _make_hook(teacher_feats, 8)),
+                ]
                 callbacks.run('on_model_save', last, epoch,
                               final_epoch, best_fitness, fi)
 
