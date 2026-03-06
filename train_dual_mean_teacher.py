@@ -357,7 +357,13 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
     stopper, stop = EarlyStopping(patience=opt.patience), False
     compute_loss = ComputeLoss(student_model)  # init loss class
-    mse_loss_fn = nn.MSELoss()
+
+    def normed_mse(a, b):
+        # L2-normalize along channel dim so the loss is in [0, 4] regardless
+        # of feature map size — makes weight_consistency_loss directly meaningful
+        a = F.normalize(a, dim=1)
+        b = F.normalize(b, dim=1)
+        return F.mse_loss(a, b)
 
     callbacks.run('on_train_start')
     LOGGER.info(f'Image sizes {imgsz} train, {imgsz} val\n'
@@ -398,7 +404,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         student_optimizer.zero_grad()
         target_iter = iter(cycle(unsupervised_loader))
         consistency_warmup_epochs = 15  # No consistency loss for first 15 epochs
-        rampup_length = 20
+        rampup_length = 10
         weight_for_consistency_loss = opt.weight_consistency_loss * \
             sigmoid_rampup(max(0, epoch - consistency_warmup_epochs),
                            rampup_length) if epoch >= consistency_warmup_epochs else 0.0
@@ -461,8 +467,17 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 with torch.no_grad():
                     teacher_pred_target = teacher_model(imgs_teacher)
                 # consistency_loss = torch.tensor(0.0, device=device)
-                consistency_loss = mse_loss_fn(student_feats[7], teacher_feats[7]) + mse_loss_fn(student_feats[8], teacher_feats[8])
-                print(f"supervised_loss: {supervised_loss}, consistency_loss: {consistency_loss}, weight_for_consistency_loss: {weight_for_consistency_loss}")
+                consistency_loss = normed_mse(student_feats[7], teacher_feats[7]) + normed_mse(
+                    # each term in [0, 4], total in [0, 8]
+                    student_feats[8], teacher_feats[8])
+                print(
+                    f"supervised_loss: {supervised_loss}, consistency_loss: {consistency_loss}, weight_for_consistency_loss: {weight_for_consistency_loss}")
+
+                combined_loss_items = torch.cat([
+                    supervised_loss_items,
+                    consistency_loss.detach().unsqueeze(0)
+                ])
+
                 total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss
                 # unsupervised learning with target data
                 if RANK != -1:
