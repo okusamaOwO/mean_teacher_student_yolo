@@ -64,6 +64,8 @@ from tqdm import tqdm
 from helpers.add_noise import add_weak_augmentation, add_strong_augmentation
 from helpers.update_teacher import update_teacher
 from helpers.sigmoid_rampup import sigmoid_rampup
+from helpers.grl import GradientReversalLayer, get_grl_lambda
+from helpers.discriminator import DomainDiscriminator
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLO root directory
@@ -320,7 +322,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     for param in teacher_model.parameters():
         param.requires_grad = False  # Ensure teacher doesn't need gradients
 
-    # ----- Feature map hooks for layers 7 & 8 -----
+    # ----- Feature map hooks for layers 3, 7 & 8 -----
+    # Layer 3: used for GRL domain adaptation
+    # Layers 7 & 8: used for consistency loss
     student_feats = {}
     teacher_feats = {}
 
@@ -330,6 +334,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         return hook
 
     _student_hooks = [
+        de_parallel(student_model).model[3].register_forward_hook(
+            _make_hook(student_feats, 3)),  # For GRL domain adaptation
         de_parallel(student_model).model[7].register_forward_hook(
             _make_hook(student_feats, 7)),
         de_parallel(student_model).model[8].register_forward_hook(
@@ -341,6 +347,26 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         de_parallel(teacher_model).model[8].register_forward_hook(
             _make_hook(teacher_feats, 8)),
     ]
+    # -----------------------------------------------
+
+    # ----- GRL and Domain Discriminator Setup -----
+    # Get channel size from layer 3 (typically 256 for YOLOv9)
+    # We'll dynamically determine this during first forward pass
+    grl = GradientReversalLayer(lambda_=1.0)
+    
+    # Initialize discriminator with layer 3 output channels
+    # For YOLOv9-c: layer 3 outputs 256 channels
+    discriminator_in_channels = 256  # Default, will be verified dynamically
+    domain_discriminator = DomainDiscriminator(
+        in_channels=discriminator_in_channels,
+        hidden_dim=256,
+        num_layers=3
+    ).to(device)
+    
+    # Add discriminator parameters to optimizer
+    discriminator_optimizer = smart_optimizer(
+        domain_discriminator, opt.optimizer, hyp['lr0'], hyp['momentum'], hyp['weight_decay'])
+    discriminator_scheduler = lr_scheduler.LambdaLR(discriminator_optimizer, lr_lambda=lf)
     # -----------------------------------------------
 
     # Start training
@@ -392,18 +418,24 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
-        mloss = torch.zeros(4, device=device)  # mean losses
+        mloss = torch.zeros(5, device=device)  # mean losses (box, cls, dfl, con, domain)
         if RANK != -1:
             train_loader.sampler.set_epoch(epoch)
         pbar = enumerate(train_loader)
-        LOGGER.info(('\n' + '%11s' * 8) % (
-            'Epoch', 'GPU_mem', 'box_loss', 'cls_loss', 'dfl_loss', 'con_loss', 'Instances', 'Size'))
+        LOGGER.info(('\n' + '%11s' * 9) % (
+            'Epoch', 'GPU_mem', 'box_loss', 'cls_loss', 'dfl_loss', 'con_loss', 'dom_loss', 'Instances', 'Size'))
         if RANK in {-1, 0}:
             # progress bar
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)
         student_optimizer.zero_grad()
+        discriminator_optimizer.zero_grad()
         target_iter = iter(cycle(unsupervised_loader))
         weight_for_consistency_loss = opt.weight_consistency_loss if epoch >= 10 else 0.0
+        weight_for_domain_loss = opt.weight_domain_loss if epoch >= 10 else 0.0
+        
+        # Update GRL lambda with scheduling (gradually increase adversarial strength)
+        grl_lambda = get_grl_lambda(epoch, epochs, gamma=10.0)
+        grl.set_lambda(grl_lambda)
         for i, (source_imgs, source_labels, paths,
                 _) in pbar:  # batch -------------------------------------------------------------
             target_imgs, _, target_paths, _ = next(target_iter)
@@ -457,24 +489,59 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 student_pred = student_model(source_imgs)  # student forward
                 supervised_loss, supervised_loss_items = compute_loss(student_pred, source_labels.to(
                     device))  # loss scaled by batch_size
+                
+                # Store source domain features from layer 3
+                source_feats_layer3 = student_feats[3].clone()
 
                 # CONSISTENCY LOSS
                 student_pred_target = student_model(imgs_student)
+                
+                # Store target domain features from layer 3
+                target_feats_layer3 = student_feats[3].clone()
+                
                 with torch.no_grad():
                     teacher_pred_target = teacher_model(imgs_teacher)
                 # consistency_loss = torch.tensor(0.0, device=device)
                 consistency_loss = normed_mse(student_feats[7], teacher_feats[7]) + normed_mse(
                     # each term in [0, 4], total in [0, 8]
                     student_feats[8], teacher_feats[8])
+                
+                # DOMAIN ADVERSARIAL LOSS (GRL)
+                # Apply GRL and pass through discriminator
+                # Source domain label = 0, Target domain label = 1
+                batch_size_source = source_feats_layer3.size(0)
+                batch_size_target = target_feats_layer3.size(0)
+                
+                source_domain_labels = torch.zeros(batch_size_source, 1, device=device)
+                target_domain_labels = torch.ones(batch_size_target, 1, device=device)
+                
+                # Apply GRL before discriminator (reverses gradients during backprop)
+                source_feats_grl = grl(source_feats_layer3)
+                target_feats_grl = grl(target_feats_layer3)
+                
+                # Get domain predictions
+                source_domain_preds = domain_discriminator(source_feats_grl)
+                target_domain_preds = domain_discriminator(target_feats_grl)
+                
+                # Concatenate and compute BCE loss
+                domain_preds = torch.cat([source_domain_preds, target_domain_preds], dim=0)
+                domain_labels = torch.cat([source_domain_labels, target_domain_labels], dim=0)
+                domain_loss = F.binary_cross_entropy_with_logits(domain_preds, domain_labels)
+                
                 print(
-                    f"supervised_loss: {supervised_loss}, consistency_loss: {consistency_loss}, weight_for_consistency_loss: {weight_for_consistency_loss}")
+                    f"supervised_loss: {supervised_loss}, consistency_loss: {consistency_loss}, "
+                    f"domain_loss: {domain_loss}, weight_con: {weight_for_consistency_loss}, "
+                    f"weight_dom: {weight_for_domain_loss}, grl_lambda: {grl_lambda:.4f}")
 
                 combined_loss_items = torch.cat([
                     supervised_loss_items,
-                    consistency_loss.detach().unsqueeze(0)
+                    consistency_loss.detach().unsqueeze(0),
+                    domain_loss.detach().unsqueeze(0)
                 ])
 
-                total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss
+                total_loss = (supervised_loss + 
+                             weight_for_consistency_loss * consistency_loss +
+                             weight_for_domain_loss * domain_loss)
                 # unsupervised learning with target data
                 if RANK != -1:
                     total_loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
@@ -487,11 +554,16 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
             if ni - last_opt_step >= accumulate:
                 scaler.unscale_(student_optimizer)  # unscale gradients
+                scaler.unscale_(discriminator_optimizer)  # unscale discriminator gradients
                 torch.nn.utils.clip_grad_norm_(
                     student_model.parameters(), max_norm=10.0)  # clip gradients
+                torch.nn.utils.clip_grad_norm_(
+                    domain_discriminator.parameters(), max_norm=10.0)  # clip discriminator gradients
                 scaler.step(student_optimizer)  # optimizer.step
+                scaler.step(discriminator_optimizer)  # discriminator optimizer.step
                 scaler.update()
                 student_optimizer.zero_grad()
+                discriminator_optimizer.zero_grad()
 
                 if ema:
                     ema.update(student_model)
@@ -504,7 +576,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     (i + 1)  # update mean losses
                 # (GB)
                 mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'
-                pbar.set_description(('%11s' * 2 + '%11.4g' * 6) %
+                pbar.set_description(('%11s' * 2 + '%11.4g' * 7) %
                                      (f'{epoch}/{epochs - 1}', mem, *mloss, source_labels.shape[0],
                                       source_imgs.shape[-1]))
                 callbacks.run('on_train_batch_end', student_model,
@@ -516,6 +588,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         # Scheduler
         lr = [x['lr'] for x in student_optimizer.param_groups]  # for loggers
         student_scheduler.step()
+        discriminator_scheduler.step()  # step discriminator scheduler
 
         if RANK in {-1, 0}:
             # mAP
@@ -559,6 +632,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     'ema': deepcopy(ema.ema).half(),
                     'updates': ema.updates,
                     'optimizer': student_optimizer.state_dict(),
+                    'discriminator': domain_discriminator.state_dict(),
+                    'discriminator_optimizer': discriminator_optimizer.state_dict(),
                     'opt': vars(opt),
                     'git': GIT_INFO,  # {remote, branch, commit} if a git repo
                     'date': datetime.now().isoformat()}
@@ -572,6 +647,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 del ckpt
                 # Re-register hooks after saving
                 _student_hooks[:] = [
+                    de_parallel(student_model).model[3].register_forward_hook(
+                        _make_hook(student_feats, 3)),  # For GRL domain adaptation
                     de_parallel(student_model).model[7].register_forward_hook(
                         _make_hook(student_feats, 7)),
                     de_parallel(student_model).model[8].register_forward_hook(
@@ -713,6 +790,8 @@ def parse_opt(known=False):
                         default=0, help='Experimental')
     parser.add_argument('--weight-consistency-loss', type=float,
                         default=1.0, help='weight for consistency loss')
+    parser.add_argument('--weight-domain-loss', type=float,
+                        default=0.1, help='weight for domain adversarial loss (GRL)')
 
     # Logger arguments
     parser.add_argument('--entity', default=None, help='Entity')
