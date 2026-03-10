@@ -355,8 +355,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     grl = GradientReversalLayer(lambda_=1.0)
     
     # Initialize discriminator with layer 3 output channels
+    # For YOLOv9-s: layer 3 outputs 128 channels (AConv [128])
     # For YOLOv9-c: layer 3 outputs 256 channels
-    discriminator_in_channels = 256  # Default, will be verified dynamically
+    discriminator_in_channels = 128  # YOLOv9-s uses 128 channels at layer 3
     domain_discriminator = DomainDiscriminator(
         in_channels=discriminator_in_channels,
         hidden_dim=256,

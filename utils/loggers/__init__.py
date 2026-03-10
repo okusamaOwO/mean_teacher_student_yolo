@@ -64,6 +64,7 @@ class Loggers():
             'train/cls_loss',
             'train/dfl_loss',  # train loss
             'train/con_loss',
+            'train/domain_loss',  # domain adversarial loss
             'metrics/precision',
             'metrics/recall',
             'metrics/mAP_0.5',
