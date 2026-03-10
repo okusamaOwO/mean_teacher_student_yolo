@@ -466,8 +466,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 consistency_loss = normed_mse(student_feats[7], teacher_feats[7]) + normed_mse(
                     # each term in [0, 4], total in [0, 8]
                     student_feats[8], teacher_feats[8])
-                print(
-                    f"supervised_loss: {supervised_loss}, consistency_loss: {consistency_loss}, weight_for_consistency_loss: {weight_for_consistency_loss}")
 
                 combined_loss_items = torch.cat([
                     supervised_loss_items,
@@ -712,7 +710,7 @@ def parse_opt(known=False):
     parser.add_argument('--close-mosaic', type=int,
                         default=0, help='Experimental')
     parser.add_argument('--weight-consistency-loss', type=float,
-                        default=1.0, help='weight for consistency loss')
+                        default=10000.0, help='weight for consistency loss')
 
     # Logger arguments
     parser.add_argument('--entity', default=None, help='Entity')
