@@ -554,7 +554,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     'epoch': epoch,
                     'best_fitness': best_fitness,
                     'model': deepcopy(de_parallel(teacher_model)).half(),
-                    'ema': deepcopy(ema.ema).half(),
+                    'ema': deepcopy(de_parallel(teacher_model)).half(),
                     'updates': ema.updates,
                     'optimizer': student_optimizer.state_dict(),
                     'opt': vars(opt),
