@@ -62,6 +62,7 @@ import yaml
 from torch.optim import lr_scheduler
 from tqdm import tqdm
 from helpers.add_noise import add_weak_augmentation, add_strong_augmentation
+from helpers.fda import fda_amplitude_swap
 from helpers.update_teacher import update_teacher
 from helpers.sigmoid_rampup import sigmoid_rampup
 
@@ -451,10 +452,18 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     imgs_student = nn.functional.interpolate(imgs_student, size=ns, mode='bilinear',
                                                              align_corners=False)
 
+            # FDA: replace low-frequency amplitude of source with target
+            if opt.fda_beta > 0:
+                source_imgs_fda = fda_amplitude_swap(
+                    source_imgs, imgs_teacher, beta=opt.fda_beta)
+            else:
+                source_imgs_fda = source_imgs
+
             # Forward
             with torch.cuda.amp.autocast(enabled=amp):
                 #  SUPERVISED LOSS
-                student_pred = student_model(source_imgs)  # student forward
+                # student forward (FDA-adapted)
+                student_pred = student_model(source_imgs_fda)
                 supervised_loss, supervised_loss_items = compute_loss(student_pred, source_labels.to(
                     device))  # loss scaled by batch_size
 
@@ -711,6 +720,9 @@ def parse_opt(known=False):
                         default=0, help='Experimental')
     parser.add_argument('--weight-consistency-loss', type=float,
                         default=10000.0, help='weight for consistency loss')
+    parser.add_argument('--fda-beta', type=float, default=0.1,
+                        help='FDA low-frequency window size (0 < beta < 0.5); '
+                             'set to 0 to disable FDA during supervised training')
 
     # Logger arguments
     parser.add_argument('--entity', default=None, help='Entity')
