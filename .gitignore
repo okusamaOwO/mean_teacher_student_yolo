@@ -7,4 +7,5 @@
 ./mini/
 *.txt
 *.png
-
+*.ipynb
+file_run/
