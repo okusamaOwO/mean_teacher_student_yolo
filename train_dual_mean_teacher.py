@@ -64,6 +64,7 @@ from tqdm import tqdm
 from helpers.add_noise import add_weak_augmentation, add_strong_augmentation
 from helpers.update_teacher import update_teacher
 from helpers.sigmoid_rampup import sigmoid_rampup
+from helpers.apply_FDA import fourier_domain_adaptation
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLO root directory
@@ -404,6 +405,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         student_optimizer.zero_grad()
         target_iter = iter(cycle(unsupervised_loader))
         weight_for_consistency_loss = opt.weight_consistency_loss if epoch >= 10 else 0.0
+        beta_FDA = opt.fda_beta * (1 - sigmoid_rampup(epoch, epochs))
+
+
         for i, (source_imgs, source_labels, paths,
                 _) in pbar:  # batch -------------------------------------------------------------
             target_imgs, _, target_paths, _ = next(target_iter)
@@ -412,6 +416,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             ni = i + nb * epoch
             imgs_teacher = add_weak_augmentation(target_imgs)
             imgs_student = add_strong_augmentation(imgs_teacher)
+
+            imgs_teacher = fourier_domain_adaptation(imgs_teacher, source_imgs, beta=beta_FDA)
 
             # uint8 to float32, 0-255 to 0.0-1.0
             source_imgs = source_imgs.to(
@@ -720,6 +726,7 @@ def parse_opt(known=False):
                         help='Set bounding-box image logging interval')
     parser.add_argument('--artifact_alias', type=str,
                         default='latest', help='Version of dataset artifact to use')
+    parser.add_argument('--fda-beta', type=float, default=0.1, help='FDA beta: size of low-freq window to swap (0.01-0.09)')
 
     return parser.parse_known_args()[0] if known else parser.parse_args()
 
