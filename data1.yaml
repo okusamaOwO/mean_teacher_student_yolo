@@ -1,7 +1,13 @@
-train: /content/mean_teacher_student_yolo/drive/MyDrive/mini/train/images
-val: /content/mean_teacher_student_yolo/drive/MyDrive/mini/val/images
-target_train: /content/mean_teacher_student_yolo/drive/MyDrive/mini/unsupervised/images
-nc: 2
+train: /root/mean_teacher_student_yolo/my_dataset/mini_cityscapes_8_subset/train/images
+val: /root/mean_teacher_student_yolo/my_dataset/mid_foggy_cityscapes_subset/val/images
+target_train: /root/mean_teacher_student_yolo/my_dataset/mid_foggy_cityscapes_subset/train/images
+nc: 8
 names:
   0 : person
-  1 : car
+  1 : rider
+  2 : car
+  3 : train
+  4 : bicycle
+  5 : motorcycle
+  6 : truck
+  7 : bus
