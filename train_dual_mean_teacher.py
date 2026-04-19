@@ -128,6 +128,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         data_dict = data_dict or check_dataset(data)  # check if None
     train_path, val_path, unsupervised_data_path, depth_maps_path = data_dict[
         'train'], data_dict['val'], data_dict['target_train'], data_dict['depth_maps_path']  
+    depth_maps_train = os.path.join(depth_maps_path, "train")
+    depth_maps_val = os.path.join(depth_maps_path, "val")
     # unsupervised_data_path = "/content/mean_teacher_student_yolo/mini/train/images"
     nc = 1 if single_cls else int(data_dict['nc'])  # number of classes
     names = {0: 'item'} if single_cls and len(
@@ -421,13 +423,13 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
             # load depth maps
             for target_path in target_paths:
-                depth_map_path = os.path.join(depth_maps_path, os.path.basename(target_path).replace('.png', '.npy'))
+                depth_map_path = os.path.join(depth_maps_train, os.path.basename(target_path).replace('.png', '.npy'))
                 if os.path.exists(depth_map_path):
                     depth_map = np.load(depth_map_path)
                     depth_map_tensor = torch.from_numpy(depth_map).unsqueeze(0).unsqueeze(0).float().to(device)  # shape: (1, 1, H, W)
                     normalized_depth_map = (depth_map_tensor - depth_map_tensor.min()) / (depth_map_tensor.max() - depth_map_tensor.min() + 1e-8)
                     depth_maps = torch.cat((depth_maps, normalized_depth_map), dim=0)  # shape: (batch_size, 1, H, W)
-
+                    print(f"Shape of depth maps {depth_maps.shape}")
                 else:
                     LOGGER.warning(f"Depth map not found for {target_path} at {depth_map_path}")
             # uint8 to float32, 0-255 to 0.0-1.0
