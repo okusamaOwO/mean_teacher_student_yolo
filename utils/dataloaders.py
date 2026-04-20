@@ -718,10 +718,23 @@ class LoadImagesAndLabels(Dataset):
             labels_out[:, 1:] = torch.from_numpy(labels)
 
         # Convert
+        if img.shape[2] == 4:
+            depth = img[:, :, 3:]  # Peel off the 4th channel
+            img = img[:, :, :3]    # Keep the first 3 channels (RGB)
+        else:
+            # If no depth map was loaded, create a blank one for safety
+            depth = np.zeros((img.shape[0], img.shape[1], 1), dtype=img.dtype)
+            
+        # Convert RGB
         img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
         img = np.ascontiguousarray(img)
+        
+        # Convert Depth
+        depth = depth.transpose((2, 0, 1))    # HWC to CHW
+        depth = np.ascontiguousarray(depth)
 
-        return torch.from_numpy(img), labels_out, self.im_files[index], shapes
+        # Return 5 items instead of 4!
+        return torch.from_numpy(img), labels_out, self.im_files[index], shapes, torch.from_numpy(depth)
 
     def load_image(self, i):
         # Loads 1 image from dataset index 'i', returns (im, original hw, resized hw)

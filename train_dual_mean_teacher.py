@@ -475,7 +475,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     device))  # loss scaled by batch_size
 
                 # CONSISTENCY LOSS
-                student_pred_target = student_model(imgs_student)
+                student_pred_target = student_model(imgs_student, depth_maps)
                 with torch.no_grad():
                     teacher_pred_target = teacher_model(imgs_teacher)
                 # consistency_loss = torch.tensor(0.0, device=device)
