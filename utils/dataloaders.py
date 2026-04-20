@@ -726,19 +726,35 @@ class LoadImagesAndLabels(Dataset):
     def load_image(self, i):
         # Loads 1 image from dataset index 'i', returns (im, original hw, resized hw)
         im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i],
-        print(f"F IS {f}")
-        print(f"TYPE OF F IS {type(f)}")
+
         if im is None:  # not cached in RAM
             if fn.exists():  # load npy
                 im = np.load(fn)
             else:  # read image
                 im = cv2.imread(f)  # BGR
                 assert im is not None, f'Image Not Found {f}'
+
+            if self.depth_dir is not None:
+                depth_name = Path(f).name.replace('.png', '.npy')
+                depth_path = os.path.join(self.depth_dir, depth_name)
+                if os.path.isfile(depth_path):
+                    depth = np.load(depth_path)
+                    if depth.shape != im.shape[:2]:
+                        LOGGER.warning(f'WARNING ⚠️ Depth shape {depth.shape} does not match image shape {im.shape[:2]} for {f}. Skipping depth.')
+                    else:
+                        im = np.dstack((im, depth))  # Add depth as a fourth channel
+
             h0, w0 = im.shape[:2]  # orig hw
             r = self.img_size / max(h0, w0)  # ratio
             if r != 1:  # if sizes are not equal
                 interp = cv2.INTER_LINEAR if (self.augment or r > 1) else cv2.INTER_AREA
-                im = cv2.resize(im, (int(w0 * r), int(h0 * r)), interpolation=interp)
+                if self.depth_dir is not None:
+                    im_rgb = im[:, :, :3]
+                    im_depth = im[:, :, 3]
+                    im_rgb = cv2.resize(im_rgb, (int(w0 * r), int(h0 * r)), interpolation=interp)
+                    im = np.dstack((im_rgb, im_depth))
+                else:
+                    im = cv2.resize(im, (int(w0 * r), int(h0 * r)), interpolation=interp)
             return im, (h0, w0), im.shape[:2]  # im, hw_original, hw_resized
         return self.ims[i], self.im_hw0[i], self.im_hw[i]  # im, hw_original, hw_resized
 
