@@ -407,8 +407,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         student_optimizer.zero_grad()
         target_iter = iter(cycle(unsupervised_loader))
         weight_for_consistency_loss = opt.weight_consistency_loss if epoch >= 10 else 0.0
-        for i, (source_imgs, source_labels, paths,
-                _) in pbar:  # batch -------------------------------------------------------------
+        for i, (source_imgs, source_labels, paths, _, _) in pbar:  # batch -------------------------------------------------------------
             target_imgs, _, target_paths, _, depth_maps = next(target_iter)
             callbacks.run('on_train_batch_start')
             # number integrated batches (since train start)
