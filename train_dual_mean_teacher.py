@@ -336,16 +336,12 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             _make_hook(student_feats, 7)),
         de_parallel(student_model).model[8].register_forward_hook(
             _make_hook(student_feats, 8)),
-        de_parallel(student_model).model[0].register_forward_hook(
-            _make_hook(student_feats, 0))
     ]
     _teacher_hooks = [
         de_parallel(teacher_model).model[7].register_forward_hook(
             _make_hook(teacher_feats, 7)),
         de_parallel(teacher_model).model[8].register_forward_hook(
             _make_hook(teacher_feats, 8)),
-        de_parallel(teacher_model).model[0].register_forward_hook(
-            _make_hook(teacher_feats, 0))
     ]
     # -----------------------------------------------
 
@@ -490,8 +486,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     supervised_loss_items,
                     consistency_loss.detach().unsqueeze(0)
                 ])
-
-                # DEPTH MAP LOSS
                 
 
                 total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss
