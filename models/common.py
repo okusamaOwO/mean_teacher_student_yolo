@@ -46,6 +46,8 @@ class DepthParamsModule(nn.Module):
         f_x: Feature map from YOLOv9 backbone. Shape: (B, C, H, W)
         d_x: Resized Depth map from Depth Anything V2. Shape: (B, 1, H, W)
         """
+        if d_x is None:
+            d_x = torch.zeros((x.shape[0], 1, x.shape[2], x.shape[3]), device=x.device, dtype=x.dtype)
         scaled_depth = self.alpha * d_x
         attention_mask = torch.sigmoid(scaled_depth)
         f_out = f_x + (attention_mask * f_x)
