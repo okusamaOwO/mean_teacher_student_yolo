@@ -38,7 +38,7 @@ def autopad(k, p=None, d=1):  # kernel, padding, dilation
     return p
 
 class DepthParamsModule(nn.Module):
-    def __init__(self, input_channels):
+    def __init__(self, input_channels, output_channels):
         super().__init__()
         self.alpha = nn.Parameter(torch.zeros(1, input_channels, 1, 1))
     def forward(self, f_x, d_x):
