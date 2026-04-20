@@ -531,7 +531,7 @@ class BaseModel(nn.Module):
             
             # --- ADD THIS CHECK HERE ---
             if 'DepthParamsModule' in m.__class__.__name__: 
-                x = m(x, d_x)
+                x = m(x, dx)
             else:
                 x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
@@ -630,10 +630,10 @@ class DetectionModel(BaseModel):
         self.info()
         LOGGER.info('')
 
-    def forward(self, x, d_x=None, augment=False, profile=False, visualize=False):
+    def forward(self, x, dx=None, augment=False, profile=False, visualize=False):
         if augment:
-            return self._forward_augment(x, d_x)  # augmented inference, None
-        return self._forward_once(x, d_x, profile, visualize)  # single-scale inference, train
+            return self._forward_augment(x, dx)  # augmented inference, None
+        return self._forward_once(x, dx, profile, visualize)  # single-scale inference, train
 
     def _forward_augment(self, x):
         img_size = x.shape[-2:]  # height, width
