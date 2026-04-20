@@ -15,6 +15,9 @@ backbone:
   [
    # conv down
    [-1, 1, Conv, [32, 3, 2]],  # 0-P1/2
+  
+   # depth params module
+    [-1, 1, DepthParamsModule, [32]],  # 1
 
    # conv down
    [-1, 1, Conv, [64, 3, 2]],  # 1-P2/4

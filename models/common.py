@@ -37,6 +37,20 @@ def autopad(k, p=None, d=1):  # kernel, padding, dilation
         p = k // 2 if isinstance(k, int) else [x // 2 for x in k]  # auto-pad
     return p
 
+class DepthParamsModule(nn.Module):
+    def __init__(self, input_channels):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.zeros(1, input_channels, 1, 1))
+    def forward(self, f_x, d_x):
+        """
+        f_x: Feature map from YOLOv9 backbone. Shape: (B, C, H, W)
+        d_x: Resized Depth map from Depth Anything V2. Shape: (B, 1, H, W)
+        """
+        scaled_depth = self.alpha * d_x
+        attention_mask = torch.sigmoid(scaled_depth)
+        f_out = f_x + (attention_mask * f_x)
+
+        return f_out
 
 class Conv(nn.Module):
     # Standard convolution with args(ch_in, ch_out, kernel, stride, padding, groups, dilation, activation)

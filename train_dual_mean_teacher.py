@@ -491,7 +491,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     consistency_loss.detach().unsqueeze(0)
                 ])
 
-                depth_loss = normed_mse(student_feats[0], teacher_feats[0])  
+                # DEPTH MAP LOSS
+                
 
                 total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss
                 # unsupervised learning with target data

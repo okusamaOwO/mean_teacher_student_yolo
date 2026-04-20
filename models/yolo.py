@@ -4,7 +4,6 @@ import platform
 import sys
 from copy import deepcopy
 from pathlib import Path
-
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[1]  # YOLO root directory
 if str(ROOT) not in sys.path:
@@ -732,7 +731,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         if m in {
             Conv, AConv, ConvTranspose, 
             Bottleneck, SPP, SPPF, DWConv, BottleneckCSP, nn.ConvTranspose2d, DWConvTranspose2d, SPPCSPC, ADown,
-            ELAN1, RepNCSPELAN4, SPPELAN}:
+            ELAN1, RepNCSPELAN4, SPPELAN, DepthParamsModule}:
             c1, c2 = ch[f], args[0]
             if c2 != no:  # if not output
                 c2 = make_divisible(c2 * gw, 8)
