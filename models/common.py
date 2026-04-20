@@ -20,6 +20,8 @@ from IPython.display import display
 from PIL import Image
 from torch.cuda import amp
 
+import torch.nn.functional as F 
+
 from utils import TryExcept
 from utils.dataloaders import exif_transpose, letterbox
 from utils.general import (LOGGER, ROOT, Profile, check_requirements, check_suffix, check_version, colorstr,
@@ -41,13 +43,18 @@ class DepthParamsModule(nn.Module):
     def __init__(self, input_channels, output_channels):
         super().__init__()
         self.alpha = nn.Parameter(torch.zeros(1, input_channels, 1, 1))
-    def forward(self, x, d_x):
+    def forward(self, x, d_x=None):
         """
         x: Feature map from YOLOv9 backbone. Shape: (B, C, H, W)
         d_x: Resized Depth map from Depth Anything V2. Shape: (B, 1, H, W)
         """
         if d_x is None:
+            # your dummy zero-tensor creation...
             d_x = torch.zeros((x.shape[0], 1, x.shape[2], x.shape[3]), device=x.device, dtype=x.dtype)
+            
+        if d_x.shape[2:] != x.shape[2:]:
+            d_x = F.interpolate(d_x, size=x.shape[2:], mode='nearest')
+        
         scaled_depth = self.alpha * d_x
         attention_mask = torch.sigmoid(scaled_depth)
         f_out = x + (attention_mask * x)
@@ -505,7 +512,7 @@ class SPPF(nn.Module):
             return self.cv2(torch.cat((x, y1, y2, self.m(y2)), 1))
 
 
-import torch.nn.functional as F
+import torch.nn.functional as F  # Ensure this is imported at the top of common.py
 
 
 class ReOrg(nn.Module):
