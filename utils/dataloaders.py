@@ -748,10 +748,11 @@ class LoadImagesAndLabels(Dataset):
             r = self.img_size / max(h0, w0)  # ratio
             if r != 1:  # if sizes are not equal
                 interp = cv2.INTER_LINEAR if (self.augment or r > 1) else cv2.INTER_AREA
-                if self.depth_dir is not None:
+                if self.depth_dir is not None and im.shape[2] == 4:  # Added im.shape[2] == 4 check!
                     im_rgb = im[:, :, :3]
                     im_depth = im[:, :, 3]
                     im_rgb = cv2.resize(im_rgb, (int(w0 * r), int(h0 * r)), interpolation=interp)
+                    im_depth = cv2.resize(im_depth, (int(w0 * r), int(h0 * r)), interpolation=cv2.INTER_NEAREST)
                     im = np.dstack((im_rgb, im_depth))
                 else:
                     im = cv2.resize(im, (int(w0 * r), int(h0 * r)), interpolation=interp)
