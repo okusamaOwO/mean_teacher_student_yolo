@@ -41,16 +41,16 @@ class DepthParamsModule(nn.Module):
     def __init__(self, input_channels, output_channels):
         super().__init__()
         self.alpha = nn.Parameter(torch.zeros(1, input_channels, 1, 1))
-    def forward(self, f_x, d_x):
+    def forward(self, x, d_x):
         """
-        f_x: Feature map from YOLOv9 backbone. Shape: (B, C, H, W)
+        x: Feature map from YOLOv9 backbone. Shape: (B, C, H, W)
         d_x: Resized Depth map from Depth Anything V2. Shape: (B, 1, H, W)
         """
         if d_x is None:
             d_x = torch.zeros((x.shape[0], 1, x.shape[2], x.shape[3]), device=x.device, dtype=x.dtype)
         scaled_depth = self.alpha * d_x
         attention_mask = torch.sigmoid(scaled_depth)
-        f_out = f_x + (attention_mask * f_x)
+        f_out = x + (attention_mask * x)
 
         return f_out
 
