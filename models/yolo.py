@@ -73,7 +73,6 @@ class Detect(nn.Module):
             a[-1].bias.data[:] = 1.0  # box
             b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
 
-
 class DDetect(nn.Module):
     # YOLO Detect head for detection models
     dynamic = False  # force grid reconstruction
@@ -522,7 +521,7 @@ class BaseModel(nn.Module):
     def forward(self, x, dx=None, profile=False, visualize=False):
         return self._forward_once(x, dx, profile, visualize)  # single-scale inference, train
 
-    def _forward_once(self, x, dx=None profile=False, visualize=False):
+    def _forward_once(self, x, dx=None, profile=False, visualize=False):
         y, dt = [], []  # outputs
         for m in self.model:
             if m.f != -1:  # if not from previous layer
