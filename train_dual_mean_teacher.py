@@ -63,7 +63,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-torch.autograd.set_detect_anomaly(True)
+# torch.autograd.set_detect_anomaly(True)  # <-- Commented out: This completely breaks AMP training!
 
 
 FILE = Path(__file__).resolve()
@@ -414,7 +414,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         # batch -------------------------------------------------------------
         for i, (source_imgs, source_labels, paths, _, _) in pbar:
             target_imgs, _, target_paths, _, depth_maps = next(target_iter)
-            print(f"max of depth maps: {torch.max(depth_maps).item()}, min of depth maps: {torch.min(depth_maps).item()}")
+            print(
+                f"max of depth maps: {torch.max(depth_maps).item()}, min of depth maps: {torch.min(depth_maps).item()}")
 
             callbacks.run('on_train_batch_start')
             # number integrated batches (since train start)
@@ -442,8 +443,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             imgs_student = imgs_student.to(
                 device, non_blocking=True).float() / 255
             depth_maps = depth_maps.to(device, non_blocking=True).float()
-            depth_maps = (depth_maps - depth_maps.min()) / (depth_maps.max() - depth_maps.min() + 1e-8)  # normalize to [0, 1]
-            
+            depth_maps = (depth_maps - depth_maps.min()) / (depth_maps.max() -
+                                                            # normalize to [0, 1]
+                                                            depth_maps.min() + 1e-8)
 
             # Warmup
             if ni <= nw:
