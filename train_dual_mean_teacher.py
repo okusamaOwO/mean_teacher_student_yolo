@@ -441,8 +441,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 device, non_blocking=True).float() / 255
             imgs_student = imgs_student.to(
                 device, non_blocking=True).float() / 255
-            depth_maps = depth_maps.to(device, non_blocking=True).float(
-            ) / torch.max(depth_maps)  # normalize depth maps to [0, 1]
+            depth_maps = depth_maps.to(device, non_blocking=True).float()
+            depth_maps = (depth_maps - depth_maps.min()) / (depth_maps.max() - depth_maps.min() + 1e-8)  # normalize to [0, 1]
             
 
             # Warmup
