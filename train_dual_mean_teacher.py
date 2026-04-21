@@ -1,3 +1,14 @@
+from helpers.sigmoid_rampup import sigmoid_rampup
+from helpers.update_teacher import update_teacher
+from helpers.add_noise import add_weak_augmentation, add_strong_augmentation
+from tqdm import tqdm
+from torch.optim import lr_scheduler
+import yaml
+import torchvision.transforms.functional as TF
+import torch.nn.utils.spectral_norm as spectral_norm
+import torch.nn.functional as F
+import torch.nn as nn
+import torch.distributed as dist
 from utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, select_device, smart_DDP, smart_optimizer,
                                smart_resume, torch_distributed_zero_first)
 from utils.plots import plot_evolve
@@ -53,18 +64,7 @@ from pathlib import Path
 import numpy as np
 import torch
 torch.autograd.set_detect_anomaly(True)
-import torch.distributed as dist
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.nn.utils.spectral_norm as spectral_norm
-import torchvision.transforms.functional as TF
 
-import yaml
-from torch.optim import lr_scheduler
-from tqdm import tqdm
-from helpers.add_noise import add_weak_augmentation, add_strong_augmentation
-from helpers.update_teacher import update_teacher
-from helpers.sigmoid_rampup import sigmoid_rampup
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLO root directory
@@ -129,7 +129,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     with torch_distributed_zero_first(LOCAL_RANK):
         data_dict = data_dict or check_dataset(data)  # check if None
     train_path, val_path, unsupervised_data_path, depth_maps_path = data_dict[
-        'train'], data_dict['val'], data_dict['target_train'], data_dict['depth_maps_path']  
+        'train'], data_dict['val'], data_dict['target_train'], data_dict['depth_maps_path']
     depth_maps_train = os.path.join(depth_maps_path, "train")
     depth_maps_val = os.path.join(depth_maps_path, "val")
     # unsupervised_data_path = "/content/mean_teacher_student_yolo/mini/train/images"
@@ -364,10 +364,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     compute_loss = ComputeLoss(student_model)  # init loss class
 
     def normed_mse(a, b):
-        # L2-normalize along channel dim so the loss is in [0, 4] regardless
-        # of feature map size — makes weight_consistency_loss directly meaningful
-        a = F.normalize(a, dim=1)
-        b = F.normalize(b, dim=1)
+        # Cast to float32 to prevent Float16 AMP underflows, and add explicit epsilon to prevent division by zero
+        a = F.normalize(a.float(), dim=1, eps=1e-6)
+        b = F.normalize(b.float(), dim=1, eps=1e-6)
         return F.mse_loss(a, b)
 
     callbacks.run('on_train_start')
@@ -409,7 +408,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         student_optimizer.zero_grad()
         target_iter = iter(cycle(unsupervised_loader))
         weight_for_consistency_loss = opt.weight_consistency_loss if epoch >= 10 else 0.0
-        for i, (source_imgs, source_labels, paths, _, _) in pbar:  # batch -------------------------------------------------------------
+        # batch -------------------------------------------------------------
+        for i, (source_imgs, source_labels, paths, _, _) in pbar:
             target_imgs, _, target_paths, _, depth_maps = next(target_iter)
             callbacks.run('on_train_batch_start')
             # number integrated batches (since train start)
@@ -436,7 +436,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 device, non_blocking=True).float() / 255
             imgs_student = imgs_student.to(
                 device, non_blocking=True).float() / 255
-            depth_maps = depth_maps.to(device, non_blocking=True).float() / torch.max(depth_maps)  # normalize depth maps to [0, 1]
+            depth_maps = depth_maps.to(device, non_blocking=True).float(
+            ) / torch.max(depth_maps)  # normalize depth maps to [0, 1]
 
             # Warmup
             if ni <= nw:
@@ -478,7 +479,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 # CONSISTENCY LOSS
                 student_pred_target = student_model(imgs_student, depth_maps)
                 with torch.no_grad():
-                    teacher_pred_target = teacher_model(imgs_teacher, depth_maps)
+                    teacher_pred_target = teacher_model(
+                        imgs_teacher, depth_maps)
                 # consistency_loss = torch.tensor(0.0, device=device)
                 consistency_loss = normed_mse(student_feats[7], teacher_feats[7]) + normed_mse(
                     # each term in [0, 4], total in [0, 8]
@@ -488,7 +490,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     supervised_loss_items,
                     consistency_loss.detach().unsqueeze(0)
                 ])
-                
 
                 total_loss = supervised_loss + weight_for_consistency_loss * consistency_loss
                 # unsupervised learning with target data
