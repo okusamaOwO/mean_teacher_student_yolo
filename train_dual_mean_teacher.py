@@ -591,13 +591,17 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     de_parallel(student_model).model[7].register_forward_hook(
                         _make_hook(student_feats, 7)),
                     de_parallel(student_model).model[8].register_forward_hook(
-                        _make_hook(student_feats, 8))
+                        _make_hook(student_feats, 8)),
+                    de_parallel(student_model).model[8].register_forward_hook(
+                        _make_hook(student_feats, 0)),
                 ]
                 _teacher_hooks[:] = [
                     de_parallel(teacher_model).model[7].register_forward_hook(
                         _make_hook(teacher_feats, 7)),
                     de_parallel(teacher_model).model[8].register_forward_hook(
-                        _make_hook(teacher_feats, 8))
+                        _make_hook(teacher_feats, 8)),
+                    de_parallel(student_model).model[8].register_forward_hook(
+                        _make_hook(student_feats, 0)),
                 ]
                 callbacks.run('on_model_save', last, epoch,
                               final_epoch, best_fitness, fi)
@@ -836,25 +840,7 @@ def main(opt, callbacks=Callbacks()):
             'flipud': (1, 0.0, 1.0),  # image flip up-down (probability)
             'fliplr': (0, 0.0, 1.0),  # image flip left-right (probability)
             'mosaic': (1, 0.0, 1.0),  # image mixup (probability)
-            'mixup': (1            import torch.nn.functional as F  # Ensure this is imported at the top of common.py
-            
-            class DepthParamsModule(nn.Module):
-                # ...
-                
-                def forward(self, x, d_x=None):
-                    if d_x is None:
-                        # your dummy zero-tensor creation...
-                        d_x = torch.zeros((x.shape[0], 1, x.shape[2], x.shape[3]), device=x.device, dtype=x.dtype)
-                        
-                    # --- ADD THIS TO DYNAMICALLY RESIZE DX TO MATCH X ---
-                    if d_x.shape[2:] != x.shape[2:]:
-                        # Resize height and width (dim 2 and 3) to match x using Nearest Neighbor 
-                        # to prevent weird depth values from blurring, or you can use mode='bilinear'
-                        d_x = F.interpolate(d_x, size=x.shape[2:], mode='nearest')
-                    # ----------------------------------------------------
-                    
-                    # Now d_x and x have exactly the same Height and Width!
-                    # ... the rest of your math ..., 0.0, 1.0),  # image mixup (probability)
+            'mixup': (1, 0.0, 1.0),
             'copy_paste': (1, 0.0, 1.0)}  # segment copy-paste (probability)
 
         with open(opt.hyp, errors='ignore') as f:
