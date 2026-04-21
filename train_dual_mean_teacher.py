@@ -52,6 +52,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+torch.autograd.set_detect_anomaly(True)
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
@@ -477,7 +478,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 # CONSISTENCY LOSS
                 student_pred_target = student_model(imgs_student, depth_maps)
                 with torch.no_grad():
-                    teacher_pred_target = teacher_model(imgs_teacher)
+                    teacher_pred_target = teacher_model(imgs_teacher, depth_maps)
                 # consistency_loss = torch.tensor(0.0, device=device)
                 consistency_loss = normed_mse(student_feats[7], teacher_feats[7]) + normed_mse(
                     # each term in [0, 4], total in [0, 8]
@@ -590,17 +591,13 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     de_parallel(student_model).model[7].register_forward_hook(
                         _make_hook(student_feats, 7)),
                     de_parallel(student_model).model[8].register_forward_hook(
-                        _make_hook(student_feats, 8)),
-                    de_parallel(student_model).model[8].register_forward_hook(
-                        _make_hook(student_feats, 0)),
+                        _make_hook(student_feats, 8))
                 ]
                 _teacher_hooks[:] = [
                     de_parallel(teacher_model).model[7].register_forward_hook(
                         _make_hook(teacher_feats, 7)),
                     de_parallel(teacher_model).model[8].register_forward_hook(
-                        _make_hook(teacher_feats, 8)),
-                    de_parallel(student_model).model[8].register_forward_hook(
-                        _make_hook(student_feats, 0)),
+                        _make_hook(teacher_feats, 8))
                 ]
                 callbacks.run('on_model_save', last, epoch,
                               final_epoch, best_fitness, fi)
