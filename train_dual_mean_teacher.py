@@ -155,7 +155,21 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             'anchors')) and not resume else []  # exclude keys
         # checkpoint state_dict as FP32
         csd = ckpt['model'].float().state_dict()
-        csd = intersect_dicts(csd, student_model.state_dict(),
+        
+        # Shift indices to match the new architecture (+1 for layers >= 1)
+        shifted_csd = {}
+        for k, v in csd.items():
+            parts = k.split('.')
+            for i, part in enumerate(parts):
+                if part.isdigit():  # This finds the main layer index (e.g. '0', '1', '2')
+                    idx = int(part)
+                    if idx >= 1:
+                        parts[i] = str(idx + 1)
+                    break
+            new_k = '.'.join(parts)
+            shifted_csd[new_k] = v
+
+        csd = intersect_dicts(shifted_csd, student_model.state_dict(),
                               exclude=exclude)  # intersect
         student_model.load_state_dict(csd, strict=False)  # load
         LOGGER.info(
