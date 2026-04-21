@@ -365,9 +365,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
     def normed_mse(a, b):
         # Cast to float32 to prevent Float16 AMP underflows, and add explicit epsilon to prevent division by zero
-        print(f"Shapes of a and b: {a.shape}, {b.shape}")
-        print(f"Max values of a and b: {a.max().item()}, {b.max().item()}")
-        print(f"Min values of a and b: {a.min().item()}, {b.min().item()}")
         a = F.normalize(a.float(), dim=1, eps=1e-6)
         b = F.normalize(b.float(), dim=1, eps=1e-6)
         return F.mse_loss(a, b)
@@ -414,8 +411,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         # batch -------------------------------------------------------------
         for i, (source_imgs, source_labels, paths, _, _) in pbar:
             target_imgs, _, target_paths, _, depth_maps = next(target_iter)
-            print(
-                f"max of depth maps: {torch.max(depth_maps).item()}, min of depth maps: {torch.min(depth_maps).item()}")
 
             callbacks.run('on_train_batch_start')
             # number integrated batches (since train start)
