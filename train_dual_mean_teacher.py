@@ -365,8 +365,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
     def normed_mse(a, b):
         # Cast to float32 to prevent Float16 AMP underflows, and add explicit epsilon to prevent division by zero
-        print(f"max of a {a.max()}, max of b {b.max()}")
-        print(f"min of a {a.min()}, min of b {b.min()}")
+        # print(f"max of a {a.max()}, max of b {b.max()}")
+        # print(f"min of a {a.min()}, min of b {b.min()}")
         a = F.normalize(a.float(), dim=1, eps=1e-6)
         b = F.normalize(b.float(), dim=1, eps=1e-6)
         return F.mse_loss(a, b)
@@ -443,8 +443,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             depth_maps = (depth_maps - depth_maps.min()) / (depth_maps.max() -
                                                             # normalize to [0, 1]
                                                             depth_maps.min() + 1e-8)
-            print("max of depth maps", depth_maps.max())
-            print("min of depth maps", depth_maps.min())
+            # print("max of depth maps", depth_maps.max())
+            # print("min of depth maps", depth_maps.min())
             # Warmup
             if ni <= nw:
                 xi = [0, nw]  # x interp
