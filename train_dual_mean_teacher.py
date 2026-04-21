@@ -165,7 +165,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         student_model = Model(cfg, ch=3, nc=nc, anchors=hyp.get(
             'anchors')).to(device)  # create
 
-    amp = check_amp(student_model)  # check AMP of these two models
+    amp = False  # check AMP of these two models
 
     # Freeze
     freeze = [f'model.{x}.' for x in (freeze if len(
@@ -365,6 +365,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
     def normed_mse(a, b):
         # Cast to float32 to prevent Float16 AMP underflows, and add explicit epsilon to prevent division by zero
+        print(f"max of a {a.max()}, max of b {b.max()}")
+        print(f"min of a {a.min()}, min of b {b.min()}")
         a = F.normalize(a.float(), dim=1, eps=1e-6)
         b = F.normalize(b.float(), dim=1, eps=1e-6)
         return F.mse_loss(a, b)
@@ -441,7 +443,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             depth_maps = (depth_maps - depth_maps.min()) / (depth_maps.max() -
                                                             # normalize to [0, 1]
                                                             depth_maps.min() + 1e-8)
-
+            print("max of depth maps", depth_maps.max())
+            print("min of depth maps", depth_maps.min())
             # Warmup
             if ni <= nw:
                 xi = [0, nw]  # x interp
@@ -595,17 +598,13 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                     de_parallel(student_model).model[7].register_forward_hook(
                         _make_hook(student_feats, 7)),
                     de_parallel(student_model).model[8].register_forward_hook(
-                        _make_hook(student_feats, 8)),
-                    de_parallel(student_model).model[8].register_forward_hook(
-                        _make_hook(student_feats, 0)),
+                        _make_hook(student_feats, 8))
                 ]
                 _teacher_hooks[:] = [
                     de_parallel(teacher_model).model[7].register_forward_hook(
                         _make_hook(teacher_feats, 7)),
                     de_parallel(teacher_model).model[8].register_forward_hook(
-                        _make_hook(teacher_feats, 8)),
-                    de_parallel(student_model).model[8].register_forward_hook(
-                        _make_hook(student_feats, 0)),
+                        _make_hook(teacher_feats, 8))
                 ]
                 callbacks.run('on_model_save', last, epoch,
                               final_epoch, best_fitness, fi)
