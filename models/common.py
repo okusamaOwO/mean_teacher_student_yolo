@@ -48,16 +48,19 @@ class DepthParamsModule(nn.Module):
         x: Feature map from YOLOv9 backbone. Shape: (B, C, H, W)
         d_x: Resized Depth map from Depth Anything V2. Shape: (B, 1, H, W)
         """
+        # If no depth map is provided (like Cityscapes source data), 
+        # completely bypass to prevent the 1.5x multiplier from exploding gradients.
         if d_x is None:
-            # your dummy zero-tensor creation...
-            d_x = torch.zeros((x.shape[0], 1, x.shape[2], x.shape[3]), device=x.device, dtype=x.dtype)
+            return x
             
         if d_x.shape[2:] != x.shape[2:]:
             d_x = F.interpolate(d_x, size=x.shape[2:], mode='nearest')
         
         scaled_depth = self.alpha * d_x
-        attention_mask = torch.sigmoid(scaled_depth)
-        f_out = x + (attention_mask * x)
+        # 2 * sigmoid() bounds the multiplier between [0, 2]. 
+        # At init (scaled_depth=0), 2 * 0.5 = 1.0, preserving perfect identity (1.0 * x = x)
+        attention_mask = 2.0 * torch.sigmoid(scaled_depth)
+        f_out = x * attention_mask
 
         return f_out
 
