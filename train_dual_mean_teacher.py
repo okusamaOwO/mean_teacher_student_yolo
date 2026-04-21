@@ -414,6 +414,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         # batch -------------------------------------------------------------
         for i, (source_imgs, source_labels, paths, _, _) in pbar:
             target_imgs, _, target_paths, _, depth_maps = next(target_iter)
+            print(f"max of depth maps: {torch.max(depth_maps).item()}, min of depth maps: {torch.min(depth_maps).item()}")
+
             callbacks.run('on_train_batch_start')
             # number integrated batches (since train start)
             ni = i + nb * epoch
@@ -441,6 +443,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 device, non_blocking=True).float() / 255
             depth_maps = depth_maps.to(device, non_blocking=True).float(
             ) / torch.max(depth_maps)  # normalize depth maps to [0, 1]
+            
 
             # Warmup
             if ni <= nw:

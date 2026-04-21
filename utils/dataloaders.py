@@ -756,7 +756,8 @@ class LoadImagesAndLabels(Dataset):
                         LOGGER.warning(f'WARNING ⚠️ Depth shape {depth.shape} does not match image shape {im.shape[:2]} for {f}. Skipping depth.')
                     else:
                         im = np.dstack((im, depth))  # Add depth as a fourth channel
-
+                else:
+                    print(f'WARNING ⚠️ Depth file {depth_path} not found for image {f}. Skipping depth.')
             h0, w0 = im.shape[:2]  # orig hw
             r = self.img_size / max(h0, w0)  # ratio
             if r != 1:  # if sizes are not equal
