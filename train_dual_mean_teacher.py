@@ -310,7 +310,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                        rank=-1,
                                        workers=workers * 2,
                                        pad=0.5,
-                                       prefix=colorstr('val: '))[0]
+                                       prefix=colorstr('val: '), 
+                                       depth_dir=depth_maps_path)[0],
+                                        
 
         if not resume:
             # if not opt.noautoanchor:
