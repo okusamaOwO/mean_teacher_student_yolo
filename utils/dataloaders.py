@@ -749,7 +749,15 @@ class LoadImagesAndLabels(Dataset):
 
             if self.depth_dir is not None:
                 depth_name = Path(f).name.replace('.png', '.npy')
-                depth_path = os.path.join(self.depth_dir, depth_name)
+                
+                # Automatically determine split from the original image path
+                split_dir = 'val' if 'val' in Path(f).parts else 'train'
+                depth_path = os.path.join(self.depth_dir, split_dir, depth_name)
+
+                # Fallback directly to depth_dir if not found in split folder
+                if not os.path.isfile(depth_path):
+                    depth_path = os.path.join(self.depth_dir, depth_name)
+                    
                 if os.path.isfile(depth_path):
                     depth = np.load(depth_path)
                     if depth.shape != im.shape[:2]:
