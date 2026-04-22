@@ -155,7 +155,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             'anchors')) and not resume else []  # exclude keys
         # checkpoint state_dict as FP32
         csd = ckpt['model'].float().state_dict()
-        
+
         # Shift indices to match the new architecture (+1 for layers >= 1)
         shifted_csd = {}
         for k, v in csd.items():
@@ -310,9 +310,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                        rank=-1,
                                        workers=workers * 2,
                                        pad=0.5,
-                                       prefix=colorstr('val: '), 
-                                       depth_dir=depth_maps_path)[0],
-                                        
+                                       prefix=colorstr('val: '),
+                                       depth_dir=depth_maps_val)[0]
 
         if not resume:
             # if not opt.noautoanchor:
