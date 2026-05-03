@@ -63,7 +63,6 @@ class Loggers():
             'train/box_loss',
             'train/cls_loss',
             'train/dfl_loss',  # train loss
-            'train/con_loss',
             'metrics/precision',
             'metrics/recall',
             'metrics/mAP_0.5',
