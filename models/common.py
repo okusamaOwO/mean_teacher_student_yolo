@@ -65,7 +65,6 @@ class DCNv4Wrapper(nn.Module):
         B, C, H, W = x.shape
         # TASK 1: Flatten the spatial dimensions (H, W) into a sequence length (L).
         x_reshaped = x.reshape(B, C, H*W).permute(0, 2, 1).contiguous()  # B, L, C
-        print(f"DEBUG: dtype of x_reshaped: {x_reshaped.dtype}, contingious {x_reshaped.is_contiguous()}")
         out = self.dcn(x_reshaped, shape=(H, W)) # B, L, C
         out_restored = out.permute(0, 2, 1).reshape(B, C, H, W)
         return self.act(self.bn(out_restored))
