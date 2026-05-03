@@ -63,12 +63,13 @@ class DCNv4Wrapper(nn.Module):
         # x arrives in shape: (B, C, H, W) -> Batch, Channels, Height, Width
         x = self.preprocess(x)
         B, C, H, W = x.shape
-        
+        print(f"DEBUG: Entering DCNv4. Shape: {B}, {C}, {H}, {W}") # <--- ADD THIS
         # TASK 1: Flatten the spatial dimensions (H, W) into a sequence length (L).
         x_reshaped = x.reshape(B, C, H*W).permute(0, 2, 1)
         
         out = self.dcn(x_reshaped, shape=(H, W)) # B, L, C
-        
+        print("DEBUG: Exited DCNv4 successfully!") # <--- ADD THIS
+
         out_restored = out.permute(0, 2, 1).reshape(B, C, H, W)
         return self.act(self.bn(out_restored))
     
