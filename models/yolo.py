@@ -616,10 +616,13 @@ class DetectionModel(BaseModel):
             s = 256  # 2x min stride
             m.inplace = self.inplace
             forward = lambda x: self.forward(x)[0][0] if isinstance(m, (DualDSegment)) else self.forward(x)[0]
-            m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
+            temp_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.model.to(temp_device)  # move model to device for forward
+            m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s).to(temp_device))])  # forward
             # check_anchor_order(m)
             # m.anchors /= m.stride.view(-1, 1, 1)
-            self.stride = m.stride
+            self.model.to('cpu') 
+            self.stride = m.stride.to('cpu')
             m.bias_init()  # only run once
 
         # Init weights, biases
