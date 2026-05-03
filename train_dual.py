@@ -313,9 +313,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             # Forward
             with torch.cuda.amp.autocast(amp):
                 pred = model(imgs)  # forward
-                print("DEBUG 316, FINISHED FORWARD, STARTING LOSS COMPUTATION")
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
-                print("DEBUG 318, FINISHED COMPUTE LOSS, STARTING BACKWARD")
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
                 if opt.quad:
@@ -323,8 +321,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
             # Backward
             scaler.scale(loss).backward()
-            print("DEBUG 326, FINISHED BACKWARD, STARTING OPTIMIZER STEP")
-
             # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
             if ni - last_opt_step >= accumulate:
                 scaler.unscale_(optimizer)  # unscale gradients
@@ -335,7 +331,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 if ema:
                     ema.update(model)
                 last_opt_step = ni
-                print("DEBUG 338, FINISHED OPTIMISER, STARTING LOGGINGS")
 
 
             # Log
