@@ -531,6 +531,16 @@ class BaseModel(nn.Module):
             if profile:
                 self._profile_one_layer(m, x, dt)
             x = m(x)  # run
+
+            print("-" * 50)
+            if isinstance(x, list):
+                shapes = [xi.shape for xi in x]
+                print(f"Layer {m.i} ({m.type}): Output shape = {shapes}")
+            else:
+                print(f"Layer {m.i} ({m.type}): Output shape = {x.shape}")
+            print("-" * 50)
+
+            exit()
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
