@@ -10,6 +10,8 @@ from copy import copy
 from pathlib import Path
 from urllib.parse import urlparse
 
+from typing import Optional
+
 import cv2
 import numpy as np
 import pandas as pd
@@ -27,7 +29,7 @@ from utils.general import (LOGGER, ROOT, Profile, check_requirements, check_suff
                            xywh2xyxy, xyxy2xywh, yaml_load)
 from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import copy_attr, smart_inference_mode
-from DCNv4.DCNv4_op.DCNv4.modules.dcnv4 import DCNv4
+
 
 def autopad(k, p=None, d=1):  # kernel, padding, dilation
     # Pad to 'same' shape outputs
@@ -36,51 +38,6 @@ def autopad(k, p=None, d=1):  # kernel, padding, dilation
     if p is None:
         p = k // 2 if isinstance(k, int) else [x // 2 for x in k]  # auto-pad
     return p
-
-class DCNv4Wrapper(nn.Module):
-    default_act = nn.SiLU()  # default activation
-
-    def __init__(self, c1, c2, kernel_size=3, stride=1, act=True): 
-        super().__init__()
-        num_groups = 4
-        if c1 == c2:
-            self.preprocess = nn.Identity()
-        else:
-            self.preprocess = nn.Conv2d(c1, c2, kernel_size=1, stride=1, padding=0)
-
-        self.dcn = DCNv4(
-            channels=c2, 
-            kernel_size=kernel_size, 
-            stride=stride, 
-            group=num_groups
-        )
-        self.bn = nn.BatchNorm2d(c2)
-        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
-    
-    
-
-    def forward(self, x):
-        # x arrives in shape: (B, C, H, W) -> Batch, Channels, Height, Width
-        x = self.preprocess(x)
-        B, C, H, W = x.shape
-        # TASK 1: Flatten the spatial dimensions (H, W) into a sequence length (L).
-        x_reshaped = x.reshape(B, C, H*W).permute(0, 2, 1).contiguous()  # B, L, C
-        out = self.dcn(x_reshaped, shape=(H, W)) # B, L, C
-        out_restored = out.permute(0, 2, 1).reshape(B, C, H, W)
-        return self.act(self.bn(out_restored))
-    
-    def forward_fuse(self, x):
-        # x arrives in shape: (B, C, H, W) -> Batch, Channels, Height, Width
-        x = self.preprocess(x)
-        B, C, H, W = x.shape
-        
-        # TASK 1: Flatten the spatial dimensions (H, W) into a sequence length (L).
-        x_reshaped = x.reshape(B, C, H*W).permute(0, 2, 1)
-        
-        out = self.dcn(x_reshaped, shape=(H, W)) # B, L, C
-        
-        out_restored = out.permute(0, 2, 1).reshape(B, C, H, W)
-        return self.act(out_restored)
 
 
 class Conv(nn.Module):
@@ -535,8 +492,9 @@ class SPPF(nn.Module):
 
 
 import torch.nn.functional as F
-
-
+from torch.nn.modules.utils import _pair
+    
+    
 class ReOrg(nn.Module):
     # yolo
     def __init__(self):
@@ -659,26 +617,6 @@ class RepNCSPELAN4(nn.Module):
         y = list(self.cv1(x).split((self.c, self.c), 1))
         y.extend(m(y[-1]) for m in [self.cv2, self.cv3])
         return self.cv4(torch.cat(y, 1))
-
-class RepNCSPELAN4_DCNv4(nn.Module):
-    def __init__(self, c1, c2, c3, c4, c5=1):  # ch_in, ch_out, number, shortcut, groups, expansion
-        super().__init__()
-        self.c = c3//2
-        self.cv1 = Conv(c1, c3, 1, 1)
-        self.cv2 = nn.Sequential(RepNCSP(c3//2, c4, c5), DCNv4Wrapper(c4, c4, 3, 1))
-        self.cv3 = nn.Sequential(RepNCSP(c4, c4, c5), DCNv4Wrapper(c4, c4, 3, 1))
-        self.cv4 = Conv(c3+(2*c4), c2, 1, 1)
-
-    def forward(self, x):
-        y = list(self.cv1(x).chunk(2, 1))
-        y.extend((m(y[-1])) for m in [self.cv2, self.cv3])
-        return self.cv4(torch.cat(y, 1))
-
-    def forward_split(self, x):
-        y = list(self.cv1(x).split((self.c, self.c), 1))
-        y.extend(m(y[-1]) for m in [self.cv2, self.cv3])
-        return self.cv4(torch.cat(y, 1))
-
 
 #################
 

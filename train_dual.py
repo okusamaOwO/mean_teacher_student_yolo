@@ -111,6 +111,34 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         model = Model(cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
         exclude = ['anchor'] if (cfg or hyp.get('anchors')) and not resume else []  # exclude keys
         csd = ckpt['model'].float().state_dict()  # checkpoint state_dict as FP32
+        
+        # --- CUSTOM LAYER SHIFT FOR P2 HEAD ---
+        print(f"config", str(cfg))
+        if 'yolov9s-p2' in str(cfg):
+            mapped_csd = {}
+            import re
+            for k, v in csd.items():
+                match = re.match(r'^model\.(\d+)\.(.*)', k)
+                if not match:
+                    mapped_csd[k] = v
+                    continue
+                old_idx = int(match.group(1))
+                suffix = match.group(2)
+                
+                if old_idx <= 15:
+                    new_idx = old_idx  # Backbone and top FPN match exactly
+                elif 16 <= old_idx <= 28:
+                    new_idx = old_idx + 6  # Shift down past newly inserted P2 + bottom-up P3 layers
+                elif old_idx == 29:
+                    continue  # Drop old DualDDetect head entirely
+                else:
+                    new_idx = None
+                    
+                if new_idx is not None:
+                    mapped_csd[f"model.{new_idx}.{suffix}"] = v
+            csd = mapped_csd
+        # --------------------------------------
+
         csd = intersect_dicts(csd, model.state_dict(), exclude=exclude)  # intersect
         model.load_state_dict(csd, strict=False)  # load
         LOGGER.info(f'Transferred {len(csd)}/{len(model.state_dict())} items from {weights}')  # report
@@ -118,7 +146,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         model = Model(cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
     # amp = check_amp(model)  # check AMP
     amp = False
-    
+
     # Freeze
     freeze = [f'model.{x}.' for x in (freeze if len(freeze) > 1 else range(freeze[0]))]  # layers to freeze
     for k, v in model.named_parameters():

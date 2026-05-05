@@ -531,16 +531,6 @@ class BaseModel(nn.Module):
             if profile:
                 self._profile_one_layer(m, x, dt)
             x = m(x)  # run
-
-            print("-" * 50)
-            if isinstance(x, list):
-                shapes = [xi.shape for xi in x]
-                print(f"Layer {m.i} ({m.type}): Output shape = {shapes}")
-            else:
-                print(f"Layer {m.i} ({m.type}): Output shape = {x.shape}")
-            print("-" * 50)
-
-            exit()
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
@@ -626,13 +616,10 @@ class DetectionModel(BaseModel):
             s = 256  # 2x min stride
             m.inplace = self.inplace
             forward = lambda x: self.forward(x)[0][0] if isinstance(m, (DualDSegment)) else self.forward(x)[0]
-            temp_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            self.model.to(temp_device)  # move model to device for forward
-            m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s).to(temp_device))])  # forward
+            m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
             # check_anchor_order(m)
             # m.anchors /= m.stride.view(-1, 1, 1)
-            self.model.to('cpu') 
-            self.stride = m.stride.to('cpu')
+            self.stride = m.stride
             m.bias_init()  # only run once
 
         # Init weights, biases
@@ -745,7 +732,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         if m in {
             Conv, AConv, ConvTranspose, 
             Bottleneck, SPP, SPPF, DWConv, BottleneckCSP, nn.ConvTranspose2d, DWConvTranspose2d, SPPCSPC, ADown,
-            ELAN1, RepNCSPELAN4, SPPELAN, RepNCSPELAN4_DCNv4, DCNv4Wrapper}:
+            ELAN1, RepNCSPELAN4, SPPELAN}:
             c1, c2 = ch[f], args[0]
             if c2 != no:  # if not output
                 c2 = make_divisible(c2 * gw, 8)
