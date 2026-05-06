@@ -111,10 +111,9 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         model = Model(cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
         exclude = ['anchor'] if (cfg or hyp.get('anchors')) and not resume else []  # exclude keys
         csd = ckpt['model'].float().state_dict()  # checkpoint state_dict as FP32
-        
-        # --- CUSTOM LAYER SHIFT FOR P2 HEAD ---
-        print(f"config", str(cfg))
-        if 'yolov9s-p2' in str(cfg):
+        if 'yolov9-s-p2' in str(cfg) and opt.modify_csd:  # TODO: remove this block after training new checkpoints with correct architecture
+            print(f"Modifying state_dict keys for {cfg} architecture...")
+            exit()
             mapped_csd = {}
             import re
             for k, v in csd.items():
@@ -506,6 +505,8 @@ def parse_opt(known=False):
     parser.add_argument('--local_rank', type=int, default=-1, help='Automatic DDP Multi-GPU argument, do not modify')
     parser.add_argument('--min-items', type=int, default=0, help='Experimental')
     parser.add_argument('--close-mosaic', type=int, default=0, help='Experimental')
+    parser.add_argument('--modify-csd', type=bool, default=False, help='Experimental')
+
 
     # Logger arguments
     parser.add_argument('--entity', default=None, help='Entity')
