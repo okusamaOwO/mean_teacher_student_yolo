@@ -17,7 +17,8 @@ def select_candidates_in_gts(xy_centers, gt_bboxes, eps=1e-9):
     n_anchors = xy_centers.shape[0]
     bs, n_boxes, _ = gt_bboxes.shape
     lt, rb = gt_bboxes.view(-1, 1, 4).chunk(2, 2)  # left-top, right-bottom
-    bbox_deltas = torch.cat((xy_centers[None] - lt, rb - xy_centers[None]), dim=2).view(bs, n_boxes, n_anchors, -1)
+    bbox_deltas = torch.cat(
+        (xy_centers[None] - lt, rb - xy_centers[None]), dim=2).view(bs, n_boxes, n_anchors, -1)
     # return (bbox_deltas.min(3)[0] > eps).to(gt_bboxes.dtype)
     return bbox_deltas.amin(3).gt_(eps)
 
@@ -37,11 +38,15 @@ def select_highest_overlaps(mask_pos, overlaps, n_max_boxes):
     # (b, n_max_boxes, h*w) -> (b, h*w)
     fg_mask = mask_pos.sum(-2)
     if fg_mask.max() > 1:  # one anchor is assigned to multiple gt_bboxes
-        mask_multi_gts = (fg_mask.unsqueeze(1) > 1).repeat([1, n_max_boxes, 1])  # (b, n_max_boxes, h*w)
+        mask_multi_gts = (fg_mask.unsqueeze(1) > 1).repeat(
+            [1, n_max_boxes, 1])  # (b, n_max_boxes, h*w)
         max_overlaps_idx = overlaps.argmax(1)  # (b, h*w)
-        is_max_overlaps = F.one_hot(max_overlaps_idx, n_max_boxes)  # (b, h*w, n_max_boxes)
-        is_max_overlaps = is_max_overlaps.permute(0, 2, 1).to(overlaps.dtype)  # (b, n_max_boxes, h*w)
-        mask_pos = torch.where(mask_multi_gts, is_max_overlaps, mask_pos)  # (b, n_max_boxes, h*w)
+        is_max_overlaps = F.one_hot(
+            max_overlaps_idx, n_max_boxes)  # (b, h*w, n_max_boxes)
+        is_max_overlaps = is_max_overlaps.permute(0, 2, 1).to(
+            overlaps.dtype)  # (b, n_max_boxes, h*w)
+        # (b, n_max_boxes, h*w)
+        mask_pos = torch.where(mask_multi_gts, is_max_overlaps, mask_pos)
         fg_mask = mask_pos.sum(-2)
     # find each grid serve which gt(index)
     target_gt_idx = mask_pos.argmax(-2)  # (b, h*w)
@@ -59,7 +64,7 @@ class TaskAlignedAssigner(nn.Module):
         self.eps = eps
 
     @torch.no_grad()
-    def forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
+    def forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt, stride_tensor=None, image_area=None):
         """This code referenced to
            https://github.com/Nioolek/PPYOLOE_pytorch/blob/master/ppyoloe/assigner/tal_assigner.py
 
@@ -70,6 +75,8 @@ class TaskAlignedAssigner(nn.Module):
             gt_labels (Tensor): shape(bs, n_max_boxes, 1)
             gt_bboxes (Tensor): shape(bs, n_max_boxes, 4)
             mask_gt (Tensor): shape(bs, n_max_boxes, 1)
+            stride_tensor (Tensor): shape(h*w, 1)
+            image_area (float): Optional, total area of the image to calculate relative scales.
         Returns:
             target_labels (Tensor): shape(bs, num_total_anchors)
             target_bboxes (Tensor): shape(bs, num_total_anchors, 4)
@@ -87,28 +94,62 @@ class TaskAlignedAssigner(nn.Module):
                     torch.zeros_like(pd_scores[..., 0]).to(device))
 
         mask_pos, align_metric, overlaps = self.get_pos_mask(pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points,
-                                                             mask_gt)
+                                                             mask_gt, stride_tensor, image_area)
 
-        target_gt_idx, fg_mask, mask_pos = select_highest_overlaps(mask_pos, overlaps, self.n_max_boxes)
+        target_gt_idx, fg_mask, mask_pos = select_highest_overlaps(
+            mask_pos, overlaps, self.n_max_boxes)
 
         # assigned target
-        target_labels, target_bboxes, target_scores = self.get_targets(gt_labels, gt_bboxes, target_gt_idx, fg_mask)
+        target_labels, target_bboxes, target_scores = self.get_targets(
+            gt_labels, gt_bboxes, target_gt_idx, fg_mask)
 
         # normalize
         align_metric *= mask_pos
-        pos_align_metrics = align_metric.amax(axis=-1, keepdim=True)  # b, max_num_obj
-        pos_overlaps = (overlaps * mask_pos).amax(axis=-1, keepdim=True)  # b, max_num_obj
-        norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2).unsqueeze(-1)
+        pos_align_metrics = align_metric.amax(
+            axis=-1, keepdim=True)  # b, max_num_obj
+        pos_overlaps = (overlaps * mask_pos).amax(axis=-
+                                                  1, keepdim=True)  # b, max_num_obj
+        norm_align_metric = (align_metric * pos_overlaps /
+                             (pos_align_metrics + self.eps)).amax(-2).unsqueeze(-1)
         target_scores = target_scores * norm_align_metric
 
         return target_labels, target_bboxes, target_scores, fg_mask.bool()
 
-    def get_pos_mask(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt):
+    def get_pos_mask(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt, stride_tensor=None, image_area=None):
 
         # get anchor_align metric, (b, max_num_obj, h*w)
-        align_metric, overlaps = self.get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes)
+        align_metric, overlaps = self.get_box_metrics(
+            pd_scores, pd_bboxes, gt_labels, gt_bboxes)
         # get in_gts mask, (b, max_num_obj, h*w)
         mask_in_gts = select_candidates_in_gts(anc_points, gt_bboxes)
+
+        if stride_tensor is not None and image_area is not None:
+            # 1. Calculate relative area representing 5% of the total image size
+            w = gt_bboxes[..., 2] - gt_bboxes[..., 0]
+            h = gt_bboxes[..., 3] - gt_bboxes[..., 1]
+            box_area = w * h
+            # Boolean array of large objects (b, max_num_obj)
+            is_large = box_area > (0.05 * image_area)
+
+            # 2. Reshape to broadcast
+            strides = stride_tensor.view(1, 1, -1)     # (1, 1, h*w)
+            mask_large = is_large.unsqueeze(-1)        # (b, max_num_obj, 1)
+
+            # 3. Create multiplier map initially filled with 1.0s
+            multiplier = torch.ones_like(align_metric)
+
+            # 4. Soft constraint logic (bias large objects to P5/P4, demote P2/P3)
+            multiplier = torch.where(mask_large & (
+                strides == 32), multiplier * 15.0, multiplier)  # Heavily boost P5
+            multiplier = torch.where(mask_large & (
+                strides == 16), multiplier * 5.0, multiplier)  # Boost P4
+            multiplier = torch.where(mask_large & (
+                strides == 8), multiplier * 0.5, multiplier)   # Demote P3
+            multiplier = torch.where(mask_large & (
+                strides == 4), multiplier * 0.05, multiplier)  # Heavily demote P2
+
+            align_metric = align_metric * multiplier
+
         # get topk_metric mask, (b, max_num_obj, h*w)
         mask_topk = self.select_topk_candidates(align_metric * mask_in_gts,
                                                 topk_mask=mask_gt.repeat([1, 1, self.topk]).bool())
@@ -120,13 +161,17 @@ class TaskAlignedAssigner(nn.Module):
     def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes):
 
         gt_labels = gt_labels.to(torch.long)  # b, max_num_obj, 1
-        ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)  # 2, b, max_num_obj
-        ind[0] = torch.arange(end=self.bs).view(-1, 1).repeat(1, self.n_max_boxes)  # b, max_num_obj
+        ind = torch.zeros([2, self.bs, self.n_max_boxes],
+                          dtype=torch.long)  # 2, b, max_num_obj
+        ind[0] = torch.arange(end=self.bs).view(-1,
+                                                # b, max_num_obj
+                                                1).repeat(1, self.n_max_boxes)
         ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj
         # get the scores of each grid for each gt cls
         bbox_scores = pd_scores[ind[0], :, ind[1]]  # b, max_num_obj, h*w
 
-        overlaps = bbox_iou(gt_bboxes.unsqueeze(2), pd_bboxes.unsqueeze(1), xywh=False, CIoU=True).squeeze(3).clamp(0)
+        overlaps = bbox_iou(gt_bboxes.unsqueeze(2), pd_bboxes.unsqueeze(
+            1), xywh=False, CIoU=True).squeeze(3).clamp(0)
         align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
         return align_metric, overlaps
 
@@ -139,9 +184,11 @@ class TaskAlignedAssigner(nn.Module):
 
         num_anchors = metrics.shape[-1]  # h*w
         # (b, max_num_obj, topk)
-        topk_metrics, topk_idxs = torch.topk(metrics, self.topk, dim=-1, largest=largest)
+        topk_metrics, topk_idxs = torch.topk(
+            metrics, self.topk, dim=-1, largest=largest)
         if topk_mask is None:
-            topk_mask = (topk_metrics.max(-1, keepdim=True) > self.eps).tile([1, 1, self.topk])
+            topk_mask = (topk_metrics.max(-1, keepdim=True)
+                         > self.eps).tile([1, 1, self.topk])
         # (b, max_num_obj, topk)
         topk_idxs = torch.where(topk_mask, topk_idxs, 0)
         # (b, max_num_obj, topk, h*w) -> (b, max_num_obj, h*w)
@@ -163,8 +210,10 @@ class TaskAlignedAssigner(nn.Module):
         """
 
         # assigned target labels, (b, 1)
-        batch_ind = torch.arange(end=self.bs, dtype=torch.int64, device=gt_labels.device)[..., None]
-        target_gt_idx = target_gt_idx + batch_ind * self.n_max_boxes  # (b, h*w)
+        batch_ind = torch.arange(
+            end=self.bs, dtype=torch.int64, device=gt_labels.device)[..., None]
+        target_gt_idx = target_gt_idx + \
+            batch_ind * self.n_max_boxes  # (b, h*w)
         target_labels = gt_labels.long().flatten()[target_gt_idx]  # (b, h*w)
 
         # assigned target boxes, (b, max_num_obj, 4) -> (b, h*w)
@@ -172,8 +221,10 @@ class TaskAlignedAssigner(nn.Module):
 
         # assigned target scores
         target_labels.clamp(0)
-        target_scores = F.one_hot(target_labels, self.num_classes)  # (b, h*w, 80)
-        fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.num_classes)  # (b, h*w, 80)
+        target_scores = F.one_hot(
+            target_labels, self.num_classes)  # (b, h*w, 80)
+        fg_scores_mask = fg_mask[:, :, None].repeat(
+            1, 1, self.num_classes)  # (b, h*w, 80)
         target_scores = torch.where(fg_scores_mask > 0, target_scores, 0)
 
         return target_labels, target_bboxes, target_scores
