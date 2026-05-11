@@ -728,6 +728,7 @@ def parse_opt(known=False):
                         default=0, help='Experimental')
     parser.add_argument('--weight-consistency-loss', type=float,
                         default=10000.0, help='weight for consistency loss')
+    parser.add_argument('--modify-csd', type=bool, default=False, help='Experimental')
 
     # Logger arguments
     parser.add_argument('--entity', default=None, help='Entity')
