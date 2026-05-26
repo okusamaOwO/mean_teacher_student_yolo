@@ -1,0 +1,11 @@
+{
+    "mcpServers": {
+        "critical-thinking": {
+            "command": "npx",
+            "args": [
+                "-y",
+                "@justarr/mcp-server-critical-thinking"
+            ]
+        }
+    }
+}
