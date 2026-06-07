@@ -2,7 +2,7 @@ from utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, select_devi
                                smart_resume, torch_distributed_zero_first)
 from utils.plots import plot_evolve
 from utils.metrics import fitness
-from utils.loss_tal_dual import ComputeLoss
+from utils.loss_tal_dual import ComputeLoss, ComputePseudoConsistencyLoss
 from utils.loggers.comet.comet_utils import check_comet_resume
 from utils.loggers import Loggers
 from utils.general import (LOGGER, TQDM_BAR_FORMAT, check_amp, check_dataset, check_file, check_git_info,
@@ -23,7 +23,7 @@ from utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, select_devi
                                smart_resume, torch_distributed_zero_first)
 from utils.plots import plot_evolve
 from utils.metrics import fitness
-from utils.loss_tal_dual import ComputeLoss
+from utils.loss_tal_dual import ComputeLoss, ComputePseudoConsistencyLoss
 from utils.loggers.comet.comet_utils import check_comet_resume
 from utils.loggers import Loggers
 from utils.general import (LOGGER, TQDM_BAR_FORMAT, check_amp, check_dataset, check_file, check_git_info,
@@ -54,7 +54,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.nn.utils.spectral_norm as spectral_norm
 import torchvision.transforms.functional as TF
 
@@ -320,29 +319,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     for param in teacher_model.parameters():
         param.requires_grad = False  # Ensure teacher doesn't need gradients
 
-    # ----- Feature map hooks for layers 7 & 8 -----
-    student_feats = {}
-    teacher_feats = {}
-
-    def _make_hook(storage, key):
-        def hook(module, input, output):
-            storage[key] = output
-        return hook
-
-    _student_hooks = [
-        de_parallel(student_model).model[7].register_forward_hook(
-            _make_hook(student_feats, 7)),
-        de_parallel(student_model).model[8].register_forward_hook(
-            _make_hook(student_feats, 8)),
-    ]
-    _teacher_hooks = [
-        de_parallel(teacher_model).model[7].register_forward_hook(
-            _make_hook(teacher_feats, 7)),
-        de_parallel(teacher_model).model[8].register_forward_hook(
-            _make_hook(teacher_feats, 8)),
-    ]
-    # -----------------------------------------------
-
     # Start training
     t0 = time.time()
     nb = len(train_loader)  # number of batches
@@ -357,13 +333,26 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
     stopper, stop = EarlyStopping(patience=opt.patience), False
     compute_loss = ComputeLoss(student_model)  # init loss class
+    compute_consistency_loss = ComputePseudoConsistencyLoss(student_model)
 
-    def normed_mse(a, b):
-        # L2-normalize along channel dim so the loss is in [0, 4] regardless
-        # of feature map size — makes weight_consistency_loss directly meaningful
-        a = F.normalize(a, dim=1)
-        b = F.normalize(b, dim=1)
-        return F.mse_loss(a, b)
+    def select_teacher_inference_output(pred):
+        pred = pred[0] if isinstance(pred, tuple) else pred
+        if isinstance(pred, list):
+            return pred[1] if len(pred) > 1 else pred[0]
+        return pred
+
+    def build_pseudo_targets(preds):
+        pseudo_targets = []
+        for image_idx, det in enumerate(preds):
+            if not det.shape[0]:
+                continue
+            if single_cls:
+                det[:, 5] = 0
+            image_idx_tensor = det.new_full((det.shape[0], 1), image_idx)
+            pseudo_targets.append(torch.cat((image_idx_tensor, det[:, 5:6], det[:, :4], det[:, 4:5]), 1))
+        if pseudo_targets:
+            return torch.cat(pseudo_targets, 0)
+        return torch.zeros((0, 7), device=device)
 
     callbacks.run('on_train_start')
     LOGGER.info(f'Image sizes {imgsz} train, {imgsz} val\n'
@@ -460,12 +449,20 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
                 # CONSISTENCY LOSS
                 student_pred_target = student_model(imgs_student)
+                teacher_was_training = teacher_model.training
+                teacher_model.eval()
                 with torch.no_grad():
                     teacher_pred_target = teacher_model(imgs_teacher)
-                # consistency_loss = torch.tensor(0.0, device=device)
-                consistency_loss = normed_mse(student_feats[7], teacher_feats[7]) + normed_mse(
-                    # each term in [0, 4], total in [0, 8]
-                    student_feats[8], teacher_feats[8])
+                    teacher_pred_target = select_teacher_inference_output(teacher_pred_target)
+                    pseudo_detections = non_max_suppression(teacher_pred_target,
+                                                            conf_thres=opt.pseudo_conf_thres,
+                                                            iou_thres=opt.pseudo_iou_thres,
+                                                            multi_label=True,
+                                                            agnostic=single_cls)
+                    pseudo_targets = build_pseudo_targets(pseudo_detections)
+                if teacher_was_training:
+                    teacher_model.train()
+                consistency_loss = compute_consistency_loss(student_pred_target, pseudo_targets)
 
                 combined_loss_items = torch.cat([
                     supervised_loss_items,
@@ -546,10 +543,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
             # Save model
             if (not nosave) or (final_epoch and not evolve):  # if save
-                # Temporarily remove hooks before deepcopy (local closures can't be pickled)
-                for h in _student_hooks + _teacher_hooks:
-                    h.remove()
-
                 ckpt = {
                     'epoch': epoch,
                     'best_fitness': best_fitness,
@@ -568,19 +561,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                 if (opt.save_period > 0 and epoch % opt.save_period == 0):
                     torch.save(ckpt, w / f'epoch{epoch}.pt')
                 del ckpt
-                # Re-register hooks after saving
-                _student_hooks[:] = [
-                    de_parallel(student_model).model[7].register_forward_hook(
-                        _make_hook(student_feats, 7)),
-                    de_parallel(student_model).model[8].register_forward_hook(
-                        _make_hook(student_feats, 8)),
-                ]
-                _teacher_hooks[:] = [
-                    de_parallel(teacher_model).model[7].register_forward_hook(
-                        _make_hook(teacher_feats, 7)),
-                    de_parallel(teacher_model).model[8].register_forward_hook(
-                        _make_hook(teacher_feats, 8)),
-                ]
                 callbacks.run('on_model_save', last, epoch,
                               final_epoch, best_fitness, fi)
 
@@ -622,10 +602,6 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                             mloss) + list(results) + lr, epoch, best_fitness, fi)
 
         callbacks.run('on_train_end', last, best, epoch, results)
-
-    # Remove feature map hooks
-    for h in _student_hooks + _teacher_hooks:
-        h.remove()
 
     torch.cuda.empty_cache()
     return results
@@ -711,6 +687,10 @@ def parse_opt(known=False):
                         default=0, help='Experimental')
     parser.add_argument('--weight-consistency-loss', type=float,
                         default=10000.0, help='weight for consistency loss')
+    parser.add_argument('--pseudo-conf-thres', type=float,
+                        default=0.5, help='teacher pseudo-label confidence threshold')
+    parser.add_argument('--pseudo-iou-thres', type=float,
+                        default=0.45, help='teacher pseudo-label NMS IoU threshold')
 
     # Logger arguments
     parser.add_argument('--entity', default=None, help='Entity')

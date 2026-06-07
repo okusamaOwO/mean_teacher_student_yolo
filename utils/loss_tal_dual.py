@@ -251,6 +251,133 @@ class ComputeLoss:
         return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
 
 
+class ComputePseudoConsistencyLoss:
+    # Compute bbox + class consistency loss from teacher pseudo labels.
+    def __init__(self, model, use_dfl=True):
+        device = next(model.parameters()).device
+        h = model.hyp
+
+        BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h["cls_pw"]], device=device), reduction='none')
+        g = h["fl_gamma"]
+        if g > 0:
+            BCEcls = FocalLoss(BCEcls, g)
+
+        m = de_parallel(model).model[-1]
+        self.BCEcls = BCEcls
+        self.stride = m.stride
+        self.nc = m.nc
+        self.no = m.no
+        self.reg_max = m.reg_max
+        self.device = device
+        self.proj = torch.arange(m.reg_max).float().to(device)
+        self.use_dfl = use_dfl
+        self.assigner = TaskAlignedAssigner(topk=int(os.getenv('YOLOM', 10)),
+                                            num_classes=self.nc,
+                                            alpha=float(os.getenv('YOLOA', 0.5)),
+                                            beta=float(os.getenv('YOLOB', 6.0)))
+        self.assigner2 = TaskAlignedAssigner(topk=int(os.getenv('YOLOM', 10)),
+                                             num_classes=self.nc,
+                                             alpha=float(os.getenv('YOLOA', 0.5)),
+                                             beta=float(os.getenv('YOLOB', 6.0)))
+        self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=False).to(device)
+        self.bbox_loss2 = BboxLoss(m.reg_max - 1, use_dfl=False).to(device)
+
+    def preprocess(self, targets, batch_size):
+        # targets: [image_idx, cls, x1, y1, x2, y2, conf] in pixels
+        if targets.shape[0] == 0:
+            return torch.zeros(batch_size, 0, 6, device=self.device)
+
+        i = targets[:, 0]
+        _, counts = i.unique(return_counts=True)
+        out = torch.zeros(batch_size, counts.max(), 6, device=self.device)
+        for j in range(batch_size):
+            matches = i == j
+            n = matches.sum()
+            if n:
+                out[j, :n] = targets[matches, 1:]
+        return out
+
+    def bbox_decode(self, anchor_points, pred_dist):
+        if self.use_dfl:
+            b, a, c = pred_dist.shape
+            pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj.type(pred_dist.dtype))
+        return dist2bbox(pred_dist, anchor_points, xywh=False)
+
+    def _split_branches(self, p):
+        feats = p[1] if isinstance(p, tuple) else p
+        if isinstance(feats, list) and feats and isinstance(feats[0], list):
+            return feats
+        return [feats]
+
+    def _assigned_confidences(self, target_bboxes, gt_bboxes, gt_conf, fg_mask):
+        assigned_conf = torch.zeros_like(fg_mask, dtype=target_bboxes.dtype)
+        for b in range(target_bboxes.shape[0]):
+            pos = fg_mask[b]
+            if not pos.any():
+                continue
+            valid = gt_conf[b, :, 0] > 0
+            if not valid.any():
+                continue
+            matches = (target_bboxes[b, pos, None] == gt_bboxes[b, valid][None]).all(-1)
+            match_idx = matches.float().argmax(-1)
+            assigned_conf[b, pos] = gt_conf[b, valid, 0][match_idx]
+        return assigned_conf
+
+    def _branch_loss(self, feats, targets, assigner, bbox_loss, branch_weight):
+        pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
+            (self.reg_max * 4, self.nc), 1)
+        pred_scores = pred_scores.permute(0, 2, 1).contiguous()
+        pred_distri = pred_distri.permute(0, 2, 1).contiguous()
+
+        dtype = pred_scores.dtype
+        batch_size = pred_scores.shape[0]
+        anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
+
+        targets = self.preprocess(targets, batch_size)
+        gt_labels, gt_bboxes, gt_conf = targets.split((1, 4, 1), 2)
+        mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0)
+
+        pred_bboxes = self.bbox_decode(anchor_points, pred_distri)
+        target_labels, target_bboxes, target_scores, fg_mask = assigner(
+            pred_scores.detach().sigmoid(),
+            (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+            anchor_points * stride_tensor,
+            gt_labels,
+            gt_bboxes,
+            mask_gt)
+
+        assigned_conf = self._assigned_confidences(target_bboxes, gt_bboxes, gt_conf, fg_mask)
+        target_scores = target_scores * assigned_conf.unsqueeze(-1)
+        target_bboxes /= stride_tensor
+        target_scores_sum = target_scores.sum().clamp(min=1)
+
+        loss_box = torch.zeros((), device=self.device, dtype=dtype)
+        if fg_mask.sum():
+            loss_box, _, _ = bbox_loss(pred_distri,
+                                       pred_bboxes,
+                                       anchor_points,
+                                       target_bboxes,
+                                       target_scores,
+                                       target_scores_sum,
+                                       fg_mask)
+
+        loss_cls = self.BCEcls(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum
+        return branch_weight * (loss_box * 7.5 + loss_cls * 0.5)
+
+    def __call__(self, p, pseudo_targets):
+        branches = self._split_branches(p)
+        if pseudo_targets.shape[0] == 0:
+            batch_size = branches[0][0].shape[0]
+            return torch.zeros((), device=self.device, dtype=branches[0][0].dtype) * batch_size
+
+        first_branch_weight = 0.25 if len(branches) > 1 else 1.0
+        loss = self._branch_loss(branches[0], pseudo_targets, self.assigner, self.bbox_loss, first_branch_weight)
+        if len(branches) > 1:
+            loss = loss + self._branch_loss(branches[1], pseudo_targets, self.assigner2, self.bbox_loss2, 1.0)
+
+        return loss * branches[0][0].shape[0]
+
+
 class ComputeLossLH:
     # Compute losses
     def __init__(self, model, use_dfl=True):
