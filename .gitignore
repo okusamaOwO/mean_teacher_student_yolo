@@ -9,3 +9,5 @@
 *.png
 *.ipynb
 file_run/
+runs/
+my_dataset/
