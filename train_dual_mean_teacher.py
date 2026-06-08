@@ -126,8 +126,8 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
     init_seeds(opt.seed + 1 + RANK, deterministic=True)
     with torch_distributed_zero_first(LOCAL_RANK):
         data_dict = data_dict or check_dataset(data)  # check if None
-    train_path, val_path, unsupervised_data_path = data_dict[
-        'train'], data_dict['val'], data_dict['target_train']
+    train_path = [data_dict['train'], data_dict['train_second']] if 'train_second' in data_dict else data_dict['train']
+    val_path, unsupervised_data_path = data_dict['val'], data_dict['target_train']
     # unsupervised_data_path = "/content/mean_teacher_student_yolo/mini/train/images"
     nc = 1 if single_cls else int(data_dict['nc'])  # number of classes
     names = {0: 'item'} if single_cls and len(

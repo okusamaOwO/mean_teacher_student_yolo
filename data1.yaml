@@ -1,6 +1,7 @@
 train: /root/mean_teacher_student_yolo/my_dataset/synfog/train/images
-val: /root/mean_teacher_student_yolo/my_dataset/processed_cityscapes_8/val/images
-target_train: /root/mean_teacher_student_yolo/my_dataset/zurich/train/images
+train_second: /root/mean_teacher_student_yolo/my_dataset/processed_cityscapes_8/train/images
+val: /root/mean_teacher_student_yolo/my_dataset/foggy_cityscapes/val/images
+target_train: /root/mean_teacher_student_yolo/my_dataset/foggy_cityscapes/train/images
 nc: 8
 names:
   0 : person
